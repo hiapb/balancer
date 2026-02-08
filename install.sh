@@ -19,9 +19,14 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-URLS=(
+URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
     "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+)
+
+URLS_GLOBAL=(
     "http://speedtest-sfo3.digitalocean.com/10gb.test"
     "http://speedtest-ny2.digitalocean.com/10gb.test"
     "http://proof.ovh.net/files/10Gb.dat"
@@ -92,8 +97,15 @@ download_noise() {
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
-    local rand_idx=$(($RANDOM % ${#URLS[@]}))
-    local url=${URLS[$rand_idx]}
+    local target_urls
+    if [ "$CURRENT_REGION" == "CN" ]; then
+        target_urls=("${URLS_CN[@]}")
+    else
+        target_urls=("${URLS_GLOBAL[@]}")
+    fi
+    
+    local rand_idx=$(($RANDOM % ${#target_urls[@]}))
+    local url=${target_urls[$rand_idx]}
     
     log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
     
@@ -182,9 +194,24 @@ install_service() {
     
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
+    
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
-    echo "REGION=$detected" >> "$CONF_FILE"
+    local detected_str="国际 (Global)"
+    [ "$detected" == "CN" ] && detected_str="国内 (CN)"
+
+    echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
+    echo -e " 请选择下载源区域:"
+    echo -e "  1. 国内 (CN)"
+    echo -e "  2. 国际 (Global)"
+    read -p " 请输入 [默认回车使用检测值]: " region_choice
+
+    local final_region=$detected
+    case $region_choice in
+        1) final_region="CN" ;;
+        2) final_region="GLOBAL" ;;
+    esac
+    echo "REGION=$final_region" >> "$CONF_FILE"
     
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
@@ -278,7 +305,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V24 (Limit Core) ${PLAIN}"
+        echo -e "${BLUE}    Traffic Balancer    ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -311,7 +338,7 @@ show_menu() {
             1) install_service ;;
             2) require_install && set_parameters ;;
             3) require_install && monitor_dashboard ;;
-            4) require_install && view_logs ;;
+            4) view_logs ;;
             5) require_install && systemctl restart traffic_balancer && echo "已重启" && sleep 1 ;;
             6) require_install && systemctl stop traffic_balancer && echo "已停止" && sleep 1 ;;
             7) uninstall_clean ;;

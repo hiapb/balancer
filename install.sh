@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer V17 (Auto-Scaling Turbo)
-# Fix: 针对大带宽场景，自动增加并发线程数 (4/8/16线程)
+# Traffic Balancer V19 (Pulse Guard Core)
+# Fix: 解决V18可能超跑的问题。采用60s脉冲机制，既保速度又保精准。
 # =========================================================
 
 RED='\033[31m'
@@ -22,25 +22,16 @@ LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
 DEFAULT_RATIO=1.3
-DEFAULT_CHECK_INTERVAL=10
+DEFAULT_CHECK_INTERVAL=5
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 强力源池 ---
-URLS_CN=(
-    "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://repo.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-)
-
-URLS_GLOBAL=(
-    "https://speed.cloudflare.com/__down?bytes=5000000000"
-    "http://speedtest-sfo3.digitalocean.com/10000mb.test"
-    "http://mirror.leaseweb.com/speedtest/10000mb.bin"
-    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+# --- 超大文件源 (不使用Range，模拟真实下载) ---
+URLS_BIG=(
+    "http://speedtest-sfo3.digitalocean.com/10gb.test"
+    "http://speedtest-ny2.digitalocean.com/10gb.test"
+    "http://speedtest-lon1.digitalocean.com/10gb.test"
     "http://proof.ovh.net/files/10Gb.dat"
-    "http://ipv4.download.thinkbroadband.com/1GB.zip"
+    "http://ipv4.download.thinkbroadband.com/10GB.zip"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -96,84 +87,62 @@ load_config() {
         MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS
     fi
     [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
-    
-    # --- V17 核心算法：根据带宽自动计算线程数 ---
-    if [ "$MAX_SPEED_MBPS" -le 100 ]; then
-        THREAD_COUNT=4
-    elif [ "$MAX_SPEED_MBPS" -le 300 ]; then
-        THREAD_COUNT=8
-    else
-        THREAD_COUNT=16
-    fi
 }
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- 并发下载器 ---
-download_thread() {
-    local PER_THREAD_LIMIT_MBPS=$1
-    local REGION=$2
+# --- V19 核心：60秒脉冲下载 ---
+download_pulse() {
+    local NEED_MB=$1; local SPEED_LIMIT_MBPS=$2
     
-    local RATE_LIMIT_MB=$(awk -v bw="$PER_THREAD_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
+    # 纯数字限速 (Bytes/s)
+    local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
-    local target_urls
-    if [ "$REGION" == "CN" ]; then target_urls=("${URLS_CN[@]}"); else target_urls=("${URLS_GLOBAL[@]}"); fi
-    local rand_idx=$(($RANDOM % ${#target_urls[@]}))
-    local url=${target_urls[$rand_idx]}
+    # 随机选一个10GB大文件
+    local rand_idx=$(($RANDOM % ${#URLS_BIG[@]}))
+    local url=${URLS_BIG[$rand_idx]}
 
-    # 后台静默运行
+    log "[执行] 缺口:${NEED_MB}MB | 目标:$(echo $url | awk -F/ '{print $3}') | 60秒脉冲下载..."
+    
+    # 核心参数：
+    # --max-time 60: 强制只跑60秒。
+    # 这意味着每分钟脚本都会重新拿回控制权，判断是否还需要继续下。
+    # 这样既保证了大文件的速度，又防止了刹不住车。
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --buffer \
-    --max-time 600 \
-    "$url" &
-}
-
-launch_turbo_download() {
-    local MISSING_MB=$1; local REGION=$2; local TOTAL_SPEED_MBPS=$3
+    --max-time 60 \
+    "$url"
     
-    # 计算单线程限速
-    local PER_THREAD_SPEED=$(awk -v total="$TOTAL_SPEED_MBPS" -v count="$THREAD_COUNT" 'BEGIN {printf "%.0f", total/count}')
-    if [ "$PER_THREAD_SPEED" -eq 0 ]; then PER_THREAD_SPEED=1; fi
-    
-    log "[Turbo] 启动 ${THREAD_COUNT} 线程 | 总速:${TOTAL_SPEED_MBPS}Mbps (单线程:${PER_THREAD_SPEED}Mbps)"
-    
-    for ((i=1; i<=THREAD_COUNT; i++)); do
-        download_thread "$PER_THREAD_SPEED" "$REGION"
-    done
-    wait
-    log "[完成] 本轮任务结束"
+    # 60秒后 curl 会因为超时自动退出，这是正常的
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:V17自适应(${THREAD_COUNT}线程) | 目标 1:$TARGET_RATIO | 总速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V19脉冲守护(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
-        # 实时重载配置，以便线程数随配置变化
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
         [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
-        
-        # 动态重算线程数
-        if [ "$MAX_SPEED_MBPS" -le 100 ]; then THREAD_COUNT=4
-        elif [ "$MAX_SPEED_MBPS" -le 300 ]; then THREAD_COUNT=8
-        else THREAD_COUNT=16; fi
         
         local RX_TOTAL=$(get_bytes rx); local TX_TOTAL=$(get_bytes tx)
         local TX_MB=$(calc_div $TX_TOTAL 1048576); local RX_MB=$(calc_div $RX_TOTAL 1048576)
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
+        # 只要有缺口，就开启下载
         if [ $(calc_gt $MISSING 50) -eq 1 ]; then
-            log "[监控] 缺口:${MISSING}MB -> 启动${THREAD_COUNT}线程并发"
-            launch_turbo_download $MISSING $REGION $MAX_SPEED_MBPS
+            log "[监控] 缺口:${MISSING}MB -> 启动60s下载"
+            download_pulse $MISSING $MAX_SPEED_MBPS
         else
+            # 如果达标了，休息久一点
             sleep 10
         fi
-        sleep 2
+        # 极短间隔，确保循环
+        sleep 1
     done
 }
 
@@ -249,7 +218,7 @@ install_service() {
     
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
-    echo -e "  1. 国内 (CN) [推荐]"
+    echo -e "  1. 国内 (CN)"
     echo -e "  2. 国际 (Global)"
     read -p " 请输入 [默认回车]: " region_choice
     local final_region=$detected
@@ -334,8 +303,6 @@ show_menu() {
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
         [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
-        # 显示动态计算的线程数
-        if [ "$MAX_SPEED_MBPS" -le 100 ]; then DISP_THREAD=4; elif [ "$MAX_SPEED_MBPS" -le 300 ]; then DISP_THREAD=8; else DISP_THREAD=16; fi
         
         clear
         local iface=$(get_interface); local rx=$(get_bytes rx); local tx=$(get_bytes tx)
@@ -348,7 +315,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V17 (Auto-Scale) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V19 (Pulse Guard) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -362,7 +329,7 @@ show_menu() {
         if is_installed; then
              echo -e " 当前策略:"
              echo -e "   目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
-             echo -e "   总限速   : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN} (自动: ${DISP_THREAD}线程)"
+             echo -e "   速度限制 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN} (单线脉冲)"
              echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 
@@ -381,7 +348,7 @@ show_menu() {
             1) install_service ;;
             2) require_install && set_parameters ;;
             3) require_install && monitor_dashboard ;;
-            4) require_install && view_logs ;;
+            4) view_logs ;;
             5) require_install && systemctl restart traffic_balancer && echo "已重启" && sleep 1 ;;
             6) require_install && systemctl stop traffic_balancer && echo "已停止" && sleep 1 ;;
             7) uninstall_clean ;;

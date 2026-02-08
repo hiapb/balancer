@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# =========================================================
-# Traffic Balancer V13 (Range-Free Core)
-# Fix: 修复 Range 头导致的 416 错误 / 强制 IPv4
-# =========================================================
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -24,18 +20,17 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 纯净大文件源 ---
 URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
 )
 
-# 移除小文件，只保留最大的测试文件
 URLS_GLOBAL=(
-    "http://speedtest-sfo3.digitalocean.com/10gb.test"
-    "http://speedtest-ny2.digitalocean.com/10gb.test"
-    "http://speedtest-lon1.digitalocean.com/10gb.test"
+    "https://speed.cloudflare.com/__down?bytes=5000000000"
+    "http://speedtest-sfo3.digitalocean.com/10000mb.test"
+    "http://mirror.leaseweb.com/speedtest/10000mb.bin"
+    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
     "http://proof.ovh.net/files/10Gb.dat"
     "http://ipv4.download.thinkbroadband.com/1GB.zip"
 )
@@ -80,7 +75,6 @@ check_dependencies() {
 }
 
 detect_region() {
-    # 增加超时和重试，防止卡死
     local info=$(curl -s --max-time 5 --retry 2 ipinfo.io || true)
     local country=$(echo "$info" | awk -F'"' '/"country":/ {print $4; exit}')
     [[ "$country" == "CN" ]] && echo "CN" || echo "GLOBAL"
@@ -98,11 +92,9 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V13 核心：移除 Range，强制 IPv4 ---
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
-    # 计算限速 B/s
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
@@ -118,10 +110,6 @@ download_noise() {
 
     log "[执行] 缺口:${NEED_MB}MB | 目标:$(echo $url | awk -F/ '{print $3}') | 限速:${SPEED_LIMIT_MBPS}Mbps"
     
-    # 核心修改：
-    # 1. 移除 -r (Range)，避免服务器拒绝
-    # 2. 添加 -4，强制使用 IPv4，修复 Code 6
-    # 3. 添加 --limit-rate (字节单位)，兼容所有版本
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --max-time 600 \
@@ -137,10 +125,9 @@ download_noise() {
 
 run_worker() {
     load_config
-    # 如果检测不到区域，默认 GLOBAL
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:V13救赎版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:下载版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -185,10 +172,16 @@ monitor_dashboard() {
     done
 }
 
+
 view_logs() {
     clear
-    echo -e "${BLUE}=== 最近 50 条日志 (按 q 或 Ctrl+C 退出查看) ===${PLAIN}"
-    tail -n 50 -f "$LOG_FILE" 
+    echo -e "${BLUE}=== 最近 50 条日志 ===${PLAIN}"
+    echo -e "${YELLOW}(日志文件: $LOG_FILE)${PLAIN}"
+    echo ""
+    tail -n 50 "$LOG_FILE"
+    echo ""
+    echo -e "${BLUE}======================${PLAIN}"
+    read -n 1 -s -r -p "按任意键返回主菜单..."
 }
 
 ensure_script_file() {
@@ -220,7 +213,7 @@ install_service() {
     
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
-    echo -e "  1. 国内 (CN) [推荐]"
+    echo -e "  1. 国内 (CN)"
     echo -e "  2. 国际 (Global)"
     read -p " 请输入 [默认回车]: " region_choice
     local final_region=$detected
@@ -314,7 +307,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V13 (Final) ${PLAIN}"
+        echo -e "${BLUE}     Traffic Balancer    ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -338,7 +331,7 @@ show_menu() {
         echo -e " 4. 查看运行日志"
         echo -e " 5. 重启服务"
         echo -e " 6. 停止服务"
-        echo -e " 7. 彻底卸载 (删除所有)"
+        echo -e " 7. 卸载和清理"
         echo -e " 0. 退出"
         echo -e ""
         read -p " 请输入选项 [0-7]: " choice

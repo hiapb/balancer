@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer 
+# Traffic Balancer
 # =========================================================
 
 # --- 视觉配置 ---
@@ -15,7 +15,7 @@ PLAIN='\033[0m'
 BOLD='\033[1m'
 
 # --- 基础路径 ---
-SCRIPT_PATH="/root/balancer.sh"
+TARGET_PATH="/root/balancer.sh"
 WORK_DIR="/etc/traffic_balancer"
 CONF_FILE="${WORK_DIR}/config.conf"
 LOG_FILE="/var/log/traffic_balancer.log"
@@ -40,6 +40,9 @@ URLS_GLOBAL=(
     "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
 )
 
+# =========================================================
+# 核心算法
+# =========================================================
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
 calc_mul() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a*b}'; }
 calc_sub() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a-b}'; }
@@ -107,7 +110,7 @@ download_noise() {
     
     if [ $(calc_gt $NEED_MB $SAFE_CAP_MB) -eq 1 ]; then
         REAL_DOWNLOAD=$SAFE_CAP_MB
-        log "[保护] 熔断触发：需求${NEED_MB}MB -> 限制为${SAFE_CAP_MB}MB"
+        log "[保护] 需求${NEED_MB}MB -> 熔断限制为${SAFE_CAP_MB}MB"
     fi
     
     local SINGLE_REQUEST_CAP=300
@@ -150,7 +153,7 @@ run_worker() {
 # UI 界面
 # =========================================================
 monitor_dashboard() {
-    clear; echo "正在初始化数据流..."; local r1=$(get_bytes rx); local t1=$(get_bytes tx)
+    clear; echo "初始化数据..."; local r1=$(get_bytes rx); local t1=$(get_bytes tx)
     while true; do
         read -t 1 -n 1 key; if [[ $? -eq 0 ]]; then break; fi
         local r2=$(get_bytes rx); local t2=$(get_bytes tx)
@@ -172,23 +175,53 @@ monitor_dashboard() {
     done
 }
 
+ensure_script_file() {
+    if [ -f "$TARGET_PATH" ]; then
+        return 0
+    fi
+    
+    echo -e "${YELLOW}检测到脚本文件不在，正在下载...${PLAIN}"
+    
+    if [ -f "$0" ]; then
+        cp "$0" "$TARGET_PATH"
+        chmod +x "$TARGET_PATH"
+        echo -e "${GREEN}已将脚本复制到 $TARGET_PATH${PLAIN}"
+    else
+        echo -e "${YELLOW}正在从 GitHub 下载完整脚本到 $TARGET_PATH ...${PLAIN}"
+        curl -o "$TARGET_PATH" -L https://raw.githubusercontent.com/hiapb/balancer/main/install.sh
+        chmod +x "$TARGET_PATH"
+        if [ -f "$TARGET_PATH" ]; then
+            echo -e "${GREEN}下载成功！${PLAIN}"
+        else
+            echo -e "${RED}下载失败，请手动执行: curl -o /root/balancer.sh ...${PLAIN}"
+            return 1
+        fi
+    fi
+}
+
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"
-    if [ ! -f "$SCRIPT_PATH" ]; then
-        echo -e "${RED}错误：请执行 mv $0 $SCRIPT_PATH${PLAIN}"; read -p "按回车退出..."; return
+    
+    ensure_script_file
+    if [ ! -f "$TARGET_PATH" ]; then
+        echo -e "${RED}无法定位脚本文件，安装终止。请按照教程先保存文件。${PLAIN}"
+        read -p "按回车退出..."
+        return
     fi
+    
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
     echo "REGION=$detected" >> "$CONF_FILE"
+    
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Traffic Balancer V5
 After=network.target
 [Service]
 Type=simple
-ExecStart=/bin/bash $SCRIPT_PATH --worker
+ExecStart=/bin/bash $TARGET_PATH --worker
 Restart=always
 RestartSec=10
 [Install]
@@ -260,7 +293,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; 
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
-        echo -e "${BLUE}Traffic Balancer V5.1 (Pro Edition)${PLAIN}"
+        echo -e "${BLUE}Traffic Balancer V5.2 (Pro Edition)${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

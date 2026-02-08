@@ -16,7 +16,7 @@ LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
 DEFAULT_RATIO=1.3
-DEFAULT_CHECK_INTERVAL=60
+DEFAULT_CHECK_INTERVAL=30
 DEFAULT_MAX_SPEED_MBPS=100
 
 URLS_CN=(
@@ -26,9 +26,9 @@ URLS_CN=(
 )
 
 URLS_GLOBAL=(
-    "https://speed.cloudflare.com/__down?bytes=500000000"
-    "http://speedtest-sfo3.digitalocean.com/1000mb.test"
-    "http://mirror.leaseweb.com/speedtest/1000mb.bin"
+    "https://speed.cloudflare.com/__down?bytes=5000000000"
+    "http://speedtest-sfo3.digitalocean.com/10000mb.test"
+    "http://mirror.leaseweb.com/speedtest/10000mb.bin"
     "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
 )
 
@@ -91,18 +91,10 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
-    local SAFE_CAP_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.0f", (bw/8) * 60 * 0.8}')
-    local REAL_DOWNLOAD=$NEED_MB
     
-    if [ $(calc_gt $NEED_MB $SAFE_CAP_MB) -eq 1 ]; then
-        REAL_DOWNLOAD=$SAFE_CAP_MB
-        log "[保护] 熔断触发：需求${NEED_MB}MB -> 限制为${SAFE_CAP_MB}MB"
-    fi
+    local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
+    local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
-    local SINGLE_REQUEST_CAP=300
-    if [ $(calc_gt $REAL_DOWNLOAD $SINGLE_REQUEST_CAP) -eq 1 ]; then REAL_DOWNLOAD=$SINGLE_REQUEST_CAP; fi
-
-    local BYTES=$(awk -v mb="$REAL_DOWNLOAD" 'BEGIN {printf "%.0f", mb*1024*1024}')
     local url=""
     if [ "$CURRENT_REGION" == "CN" ]; then
         local idx=$(($RANDOM % ${#URLS_CN[@]})); url=${URLS_CN[$idx]}
@@ -110,14 +102,14 @@ download_noise() {
         local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
     fi
     
-    log "[执行] 区域:$CURRENT_REGION | 补齐: ${REAL_DOWNLOAD} MB"
-    curl -r 0-$BYTES -L -s -o /dev/null --max-time 120 "$url"
+    log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps (${RATE_LIMIT_MB}MB/s)"
+    curl -r 0-$BYTES -L -s -o /dev/null --limit-rate "${RATE_LIMIT_MB}M" --max-time 600 "$url"
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:总量平衡 | 目标 1:$TARGET_RATIO | 带宽 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:总量平衡 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     while true; do
         sleep 5 
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -126,8 +118,8 @@ run_worker() {
         local TX_MB=$(calc_div $TX_TOTAL 1048576); local RX_MB=$(calc_div $RX_TOTAL 1048576)
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
-        if [ $(calc_gt $MISSING 20) -eq 1 ]; then
-            log "[监控] 缺口:${MISSING}MB (总上:${TX_MB} | 总下:${RX_MB})"
+        if [ $(calc_gt $MISSING 10) -eq 1 ]; then
+            log "[监控] 缺口:${MISSING}MB (上:${TX_MB} | 下:${RX_MB})"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
             sleep 30
@@ -233,12 +225,12 @@ set_parameters() {
     echo -e "${BLUE}╔════════════════════════════════════════╗${PLAIN}"
     echo -e "${BLUE}║           参数配置向导                 ║${PLAIN}"
     echo -e "${BLUE}╚════════════════════════════════════════╝${PLAIN}"
-    echo -e " 当前状态: 比例 1:${TARGET_RATIO} | 带宽 ${MAX_SPEED_MBPS} Mbps"
+    echo -e " 当前状态: 比例 1:${TARGET_RATIO} | 限速 ${MAX_SPEED_MBPS} Mbps"
     echo -e ""
     echo -e "${YELLOW}1. 设置下行比例${PLAIN} (如 1.5)"
     read -p "   请输入 (留空跳过): " input_ratio
     echo -e ""
-    echo -e "${YELLOW}2. 设置机器带宽${PLAIN} (如 100M, 1G)"
+    echo -e "${YELLOW}2. 设置速度限制${PLAIN} (如 100M, 1G)"
     read -p "   请输入 (留空跳过): " input_speed
     
     local new_ratio=$TARGET_RATIO
@@ -295,7 +287,7 @@ show_menu() {
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V6 ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -309,12 +301,12 @@ show_menu() {
         if is_installed; then
              echo -e " 当前策略:"
              echo -e "   目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
-             echo -e "   带宽保护 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
+             echo -e "   速度限制 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
              echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 
         echo -e " 1. 安装并启动服务"
-        echo -e " 2. 修改策略 (比例 / 带宽)"
+        echo -e " 2. 修改策略 (比例 / 速度)"
         echo -e " 3. 实时监控面板"
         echo -e " 4. 查看运行日志"
         echo -e " 5. 重启服务"

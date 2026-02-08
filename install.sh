@@ -11,6 +11,7 @@ PLAIN='\033[0m'
 BOLD='\033[1m'
 
 TARGET_PATH="/root/balancer.sh"
+SHORTCUT_CMD="tb"
 WORK_DIR="/etc/traffic_balancer"
 CONF_FILE="${WORK_DIR}/config.conf"
 LOG_FILE="/var/log/traffic_balancer.log"
@@ -20,9 +21,12 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
+
 URLS_CN=(
+    "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://repo.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
 )
 
@@ -75,6 +79,7 @@ check_dependencies() {
 }
 
 detect_region() {
+    # 增加超时和重试
     local info=$(curl -s --max-time 5 --retry 2 ipinfo.io || true)
     local country=$(echo "$info" | awk -F'"' '/"country":/ {print $4; exit}')
     [[ "$country" == "CN" ]] && echo "CN" || echo "GLOBAL"
@@ -127,7 +132,7 @@ run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:下载版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V15 (快捷键 tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -172,7 +177,6 @@ monitor_dashboard() {
     done
 }
 
-
 view_logs() {
     clear
     echo -e "${BLUE}=== 最近 50 条日志 ===${PLAIN}"
@@ -197,6 +201,15 @@ ensure_script_file() {
             echo -e "${RED}下载失败，请手动执行: curl -o /root/balancer.sh ...${PLAIN}"; return 1
         fi
         echo -e "${GREEN}下载成功！${PLAIN}"
+    fi
+}
+
+# 创建快捷键
+create_shortcut() {
+    if [ -f "$TARGET_PATH" ]; then
+        ln -sf "$TARGET_PATH" /usr/bin/$SHORTCUT_CMD
+        chmod +x /usr/bin/$SHORTCUT_CMD
+        echo -e "${GREEN}快捷键已创建: 输入 ${BOLD}$SHORTCUT_CMD${PLAIN}${GREEN} 即可打开菜单${PLAIN}"
     fi
 }
 
@@ -233,7 +246,9 @@ RestartSec=3
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable traffic_balancer; systemctl restart traffic_balancer
+    create_shortcut
     echo -e "${GREEN}安装完成！已选区域: $final_region${PLAIN}"
+    echo -e "${YELLOW}提示: 以后直接输入 'tb' 即可打开菜单${PLAIN}"
     read -p "按回车继续..."
 }
 
@@ -286,6 +301,7 @@ uninstall_clean() {
     rm -f "$SERVICE_FILE" "$LOG_FILE"
     rm -rf "$WORK_DIR"
     rm -f "$TARGET_PATH" 
+    rm -f "/usr/bin/$SHORTCUT_CMD" # 删除快捷键
     systemctl daemon-reload
     echo -e "${GREEN}✅ 卸载完成。${PLAIN}"
     exit 0

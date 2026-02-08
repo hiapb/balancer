@@ -1,7 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer V11 (Failover Core)
+# Traffic Balancer V12 (Compatibility Core)
+# Fix: 修复 curl exit code 2 (初始化失败) 问题
 # =========================================================
 
 RED='\033[31m'
@@ -23,7 +24,6 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 增强型源列表 (自动轮询) ---
 URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
@@ -97,14 +97,19 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V11 核心：失败自动切换源 ---
+# --- V12 核心修复：纯数字限速 ---
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
+    # 1. 计算限速值 (MB/s)
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
+    
+    # 2. 转换为字节单位 (Bytes/s)，兼容老旧curl
+    # 1 MB = 1048576 Bytes
+    local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
+    
     local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
-    # 根据区域选择源列表
     local target_urls
     if [ "$CURRENT_REGION" == "CN" ]; then
         target_urls=("${URLS_CN[@]}")
@@ -112,32 +117,30 @@ download_noise() {
         target_urls=("${URLS_GLOBAL[@]}")
     fi
     
-    # 随机打乱数组，避免每次都死磕同一个坏源
     local rand_idx=$(($RANDOM % ${#target_urls[@]}))
     local url=${target_urls[$rand_idx]}
 
-    log "[尝试] 目标源: ...$(echo $url |  awk -F/ '{print $3}') | 限速:${SPEED_LIMIT_MBPS}Mbps"
+    log "[尝试] 目标: ...$(echo $url | awk -F/ '{print $3}') | 限速: ${RATE_LIMIT_BYTES} B/s"
     
-    # 执行下载，如果失败记录错误码
-    curl -r 0-$BYTES -L -k -s -o /dev/null \
-    --limit-rate "${RATE_LIMIT_MB}M" \
+    # 移除 -k, -L, --retry 等可能导致不兼容的参数，只保留最核心的
+    # 使用纯数字作为 limit-rate
+    curl -r 0-$BYTES -s -o /dev/null \
+    --limit-rate "$RATE_LIMIT_BYTES" \
     --max-time 600 \
-    --retry 2 \
-    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
     "$url"
     
     local ret=$?
     if [ $ret -ne 0 ]; then
-        log "[错误] 下载失败 (代码: $ret). 可能源不可用或网络中断。"
+        log "[错误] 下载失败 (代码: $ret)"
     else
-        log "[完成] 单次任务结束。"
+        log "[完成] 下载结束"
     fi
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:V11故障转移 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V12兼容版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -282,23 +285,16 @@ require_install() {
     return 0
 }
 
-# 强力卸载函数
 uninstall_clean() {
     echo -e "${YELLOW}正在停止服务...${PLAIN}"
     systemctl stop traffic_balancer
     systemctl disable traffic_balancer
-    
-    echo -e "${YELLOW}正在清理残留进程...${PLAIN}"
-    # 杀掉可能卡住的 curl 或 脚本进程
     pkill -f "balancer.sh"
-    
-    echo -e "${YELLOW}正在删除文件...${PLAIN}"
     rm -f "$SERVICE_FILE" "$LOG_FILE"
     rm -rf "$WORK_DIR"
-    rm -f "$TARGET_PATH" # 连自己也删掉
-    
+    rm -f "$TARGET_PATH" 
     systemctl daemon-reload
-    echo -e "${GREEN}✅ 卸载完成。所有文件和进程已清除。${PLAIN}"
+    echo -e "${GREEN}✅ 卸载完成。${PLAIN}"
     exit 0
 }
 
@@ -318,7 +314,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V11 (Final) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V12 (Final) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

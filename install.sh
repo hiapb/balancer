@@ -180,7 +180,6 @@ ensure_script_file() {
         return 0
     fi
     
-    echo -e "${YELLOW}检测到脚本文件不在，正在下载...${PLAIN}"
     
     if [ -f "$0" ]; then
         cp "$0" "$TARGET_PATH"
@@ -293,7 +292,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; 
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
-        echo -e "${BLUE}Traffic Balancer V5.2 (Pro Edition)${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -306,8 +305,8 @@ show_menu() {
         
         if is_installed; then
              echo -e " 当前策略:"
-             echo -e "   🎯 目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
-             echo -e "   🛡️ 带宽保护 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
+             echo -e "   目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
+             echo -e "   带宽保护 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
              echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 

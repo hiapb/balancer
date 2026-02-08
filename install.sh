@@ -1,20 +1,21 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer Ultimate (智能逻辑版)
-# Logic: 仅当 (下载 < 上传 * 1.3) 时触发，否则绝对静默
-# Author: Gemini
+# Traffic Balancer 
 # =========================================================
 
-# --- 样式配置 ---
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;36m'
+# --- 视觉配置 ---
+RED='\033[31m'
+GREEN='\033[32m'
+YELLOW='\033[33m'
+BLUE='\033[36m'
+PURPLE='\033[35m'
+CYAN='\033[96m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
 # --- 基础路径 ---
+SCRIPT_PATH="/root/balancer.sh"
 WORK_DIR="/etc/traffic_balancer"
 CONF_FILE="${WORK_DIR}/config.conf"
 LOG_FILE="/var/log/traffic_balancer.log"
@@ -23,19 +24,21 @@ SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 # --- 默认配置 ---
 DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=60
-DEFAULT_MIN_UPLOAD=5 
+DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 国内高速白名单源 ---
-URLS=(
+# --- 源定义 ---
+URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.ustc.edu.cn/ubuntu-releases/22.04/ubuntu-22.04.3-desktop-amd64.iso"
 )
 
-# =========================================================
-# 数学运算核心 (Awk 替代 bc，防止报错)
-# =========================================================
+URLS_GLOBAL=(
+    "https://speed.cloudflare.com/__down?bytes=500000000"
+    "http://speedtest-sfo3.digitalocean.com/1000mb.test"
+    "http://mirror.leaseweb.com/speedtest/1000mb.bin"
+    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+)
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
 calc_mul() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a*b}'; }
@@ -43,204 +46,271 @@ calc_sub() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a-b}'; }
 calc_gt() { awk -v a="$1" -v b="$2" 'BEGIN {if (a>b) print 1; else print 0}'; }
 calc_lt() { awk -v a="$1" -v b="$2" 'BEGIN {if (a<b) print 1; else print 0}'; }
 
-# =========================================================
-# 工具函数库
-# =========================================================
+convert_to_mb() {
+    local input=$(echo "$1" | tr 'a-z' 'A-Z')
+    local val=$(echo "$input" | sed 's/[GM]//g')
+    if [[ "$input" == *"G"* ]]; then
+        awk -v v="$val" 'BEGIN {printf "%.0f", v*1024}'
+    else
+        awk -v v="$val" 'BEGIN {printf "%.0f", v}'
+    fi
+}
 
 format_size() {
-    local bytes=$1
-    if [ -z "$bytes" ]; then bytes=0; fi
+    local bytes=$1; [ -z "$bytes" ] && bytes=0
     if [[ $bytes -lt 1024 ]]; then echo "${bytes} B"
     elif [[ $bytes -lt 1048576 ]]; then echo "$(calc_div $bytes 1024) KB"
     elif [[ $bytes -lt 1073741824 ]]; then echo "$(calc_div $bytes 1048576) MB"
-    else echo "$(calc_div $bytes 1073741824) GB"
-    fi
+    else echo "$(calc_div $bytes 1073741824) GB"; fi
 }
 
 get_interface() { ip route get 8.8.8.8 | awk '{print $5; exit}'; }
 
 get_bytes() {
-    local iface=$(get_interface)
-    local type=$1
+    local iface=$(get_interface); local type=$1
     if [ "$type" == "rx" ]; then grep "$iface:" /proc/net/dev | awk '{print $2}'
     else grep "$iface:" /proc/net/dev | awk '{print $10}'; fi
 }
 
 check_dependencies() {
     if ! command -v curl &> /dev/null; then
-        echo -e "${YELLOW}正在安装 curl...${PLAIN}"
-        if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y curl
-        elif [ -x "$(command -v yum)" ]; then yum install -y curl; fi
+        if [ -x "$(command -v apt-get)" ]; then apt-get update && apt-get install -y curl; fi
+        if [ -x "$(command -v yum)" ]; then yum install -y curl; fi
     fi
 }
 
+detect_region() {
+    local info=$(curl -s --max-time 5 ipinfo.io || true)
+    local country=$(echo "$info" | awk -F'"' '/"country":/ {print $4; exit}')
+    [[ "$country" == "CN" ]] && echo "CN" || echo "GLOBAL"
+}
+
 load_config() {
-    if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"
-    else TARGET_RATIO=$DEFAULT_RATIO; fi
+    if [ -f "$CONF_FILE" ]; then 
+        source "$CONF_FILE"
+    else 
+        TARGET_RATIO=$DEFAULT_RATIO
+        MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS
+    fi
+    [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
 }
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
 # =========================================================
-# 核心工作逻辑 (Worker)
+# Worker
 # =========================================================
-
 download_noise() {
-    local NEED_MB=$1
-    local MAX_MB=50 
+    local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
+    local SAFE_CAP_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.0f", (bw/8) * 60 * 0.8}')
+    local REAL_DOWNLOAD=$NEED_MB
     
-    if [ $(calc_gt $NEED_MB $MAX_MB) -eq 1 ]; then NEED_MB=$MAX_MB; fi
+    if [ $(calc_gt $NEED_MB $SAFE_CAP_MB) -eq 1 ]; then
+        REAL_DOWNLOAD=$SAFE_CAP_MB
+        log "[保护] 熔断触发：需求${NEED_MB}MB -> 限制为${SAFE_CAP_MB}MB"
+    fi
     
-    local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
-    local idx=$(($RANDOM % ${#URLS[@]}))
-    local url=${URLS[$idx]}
+    local SINGLE_REQUEST_CAP=300
+    if [ $(calc_gt $REAL_DOWNLOAD $SINGLE_REQUEST_CAP) -eq 1 ]; then REAL_DOWNLOAD=$SINGLE_REQUEST_CAP; fi
+
+    local BYTES=$(awk -v mb="$REAL_DOWNLOAD" 'BEGIN {printf "%.0f", mb*1024*1024}')
+    local url=""
+    if [ "$CURRENT_REGION" == "CN" ]; then
+        local idx=$(($RANDOM % ${#URLS_CN[@]})); url=${URLS_CN[$idx]}
+    else
+        local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
+    fi
     
-    log "[ACTION] Compensating ${NEED_MB} MB..."
-    curl -r 0-$BYTES -L -s -o /dev/null --max-time 60 "$url"
+    log "[执行] 区域:$CURRENT_REGION | 补齐: ${REAL_DOWNLOAD} MB"
+    curl -r 0-$BYTES -L -s -o /dev/null --max-time 120 "$url"
 }
 
 run_worker() {
     load_config
-    local IFACE=$(get_interface)
-    log "[SYSTEM] Started. Ratio Target 1:$TARGET_RATIO"
-    
+    if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
+    log "[启动] 模式:总量平衡 | 目标 1:$TARGET_RATIO | 带宽 ${MAX_SPEED_MBPS}Mbps"
     while true; do
-        local RX1=$(get_bytes rx)
-        local TX1=$(get_bytes tx)
-        sleep $DEFAULT_CHECK_INTERVAL
-        local RX2=$(get_bytes rx)
-        local TX2=$(get_bytes tx)
-        
-        # 计算区间增量
-        local TX_DIFF=$((TX2 - TX1))
-        local RX_DIFF=$((RX2 - RX1))
-        local TX_MB=$(calc_div $TX_DIFF 1048576)
-        local RX_MB=$(calc_div $RX_DIFF 1048576)
-        
+        sleep 5 
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
-
-        # 1. 闲置判断 (上传 < 5MB/min 不处理)
-        if [ $(calc_lt $TX_MB $DEFAULT_MIN_UPLOAD) -eq 1 ]; then
-            # log "[IDLE] Traffic low ($TX_MB MB). Skipping."
-            continue
-        fi
-        
-        # 2. 核心判断逻辑
-        local REQUIRED_RX=$(calc_mul $TX_MB $TARGET_RATIO)
-        
-        # 如果 当前下载 > (当前上传 * 1.3)
-        if [ $(calc_gt $RX_MB $REQUIRED_RX) -eq 1 ]; then
-            # 这里就是你要的逻辑：如果不小于，则不用管
-            log "[SAFE] TX:${TX_MB}MB RX:${RX_MB}MB (Ratio OK). Skipping."
+        [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
+        local RX_TOTAL=$(get_bytes rx); local TX_TOTAL=$(get_bytes tx)
+        local TX_MB=$(calc_div $TX_TOTAL 1048576); local RX_MB=$(calc_div $RX_TOTAL 1048576)
+        local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
+        local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
+        if [ $(calc_gt $MISSING 20) -eq 1 ]; then
+            log "[监控] 缺口:${MISSING}MB (总上:${TX_MB} | 总下:${RX_MB})"
+            download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
-            # 只有小于才执行
-            local MISSING=$(calc_sub $REQUIRED_RX $RX_MB)
-            log "[UNSAFE] TX:${TX_MB}MB RX:${RX_MB}MB -> Missing ${MISSING}MB"
-            download_noise $MISSING
+            sleep 30
         fi
     done
 }
 
 # =========================================================
-# 界面逻辑
+# UI 界面
 # =========================================================
-
 monitor_dashboard() {
-    clear
-    echo -e "正在初始化监控..."
-    local r1=$(get_bytes rx); local t1=$(get_bytes tx)
+    clear; echo "正在初始化数据流..."; local r1=$(get_bytes rx); local t1=$(get_bytes tx)
     while true; do
         read -t 1 -n 1 key; if [[ $? -eq 0 ]]; then break; fi
         local r2=$(get_bytes rx); local t2=$(get_bytes tx)
         local r_speed=$((r2 - r1)); local t_speed=$((t2 - t1))
         r1=$r2; t1=$t2
-        
         clear
-        echo -e "${BLUE}========================================${PLAIN}"
-        echo -e "${BOLD}   Traffic Balancer - 实时监控   ${PLAIN}"
-        echo -e "${BLUE}========================================${PLAIN}"
-        echo -e "时间: $(date '+%H:%M:%S') | 网卡: $(get_interface)"
-        echo -e "----------------------------------------"
-        echo -e "⬇️  下载: ${GREEN}$(format_size $r_speed)/s${PLAIN}"
-        echo -e "⬆️  上传: ${YELLOW}$(format_size $t_speed)/s${PLAIN}"
-        echo -e "----------------------------------------"
-        echo -e "⬇️  总下: $(format_size $r2)"
-        echo -e "⬆️  总上: $(format_size $t2)"
-        echo -e "----------------------------------------"
-        echo -e "${YELLOW}提示: 按下 [任意键] 返回主菜单${PLAIN}"
+        echo -e "${BLUE}╔════════════════════════════════════════╗${PLAIN}"
+        echo -e "${BLUE}║          实时流量监控面板              ║${PLAIN}"
+        echo -e "${BLUE}╚════════════════════════════════════════╝${PLAIN}"
+        echo -e ""
+        echo -e "   ${GREEN}⬇️  实时下载速度${PLAIN} :  ${BOLD}$(format_size $r_speed)/s${PLAIN}"
+        echo -e "   ${YELLOW}⬆️  实时上传速度${PLAIN} :  ${BOLD}$(format_size $t_speed)/s${PLAIN}"
+        echo -e ""
+        echo -e "   ${CYAN}📦 累计总下载${PLAIN}   :  $(format_size $r2)"
+        echo -e "   ${PURPLE}📦 累计总上传${PLAIN}   :  $(format_size $t2)"
+        echo -e ""
+        echo -e "${BLUE}══════════════════════════════════════════${PLAIN}"
+        echo -e " 按任意键返回主菜单..."
     done
 }
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"
-    if [ ! -f "$CONF_FILE" ]; then echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"; fi
+    if [ ! -f "$SCRIPT_PATH" ]; then
+        echo -e "${RED}错误：请执行 mv $0 $SCRIPT_PATH${PLAIN}"; read -p "按回车退出..."; return
+    fi
+    echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
+    echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
+    echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
+    local detected=$(detect_region)
+    echo "REGION=$detected" >> "$CONF_FILE"
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Traffic Balancer Ultimate
+Description=Traffic Balancer V5
 After=network.target
 [Service]
 Type=simple
-ExecStart=/bin/bash $(readlink -f "$0") --worker
+ExecStart=/bin/bash $SCRIPT_PATH --worker
 Restart=always
 RestartSec=10
 [Install]
 WantedBy=multi-user.target
 EOF
-    systemctl daemon-reload; systemctl enable traffic_balancer; systemctl start traffic_balancer
-    echo -e "${GREEN}安装并启动成功！${PLAIN}"; read -p "按回车继续..."
-}
-
-set_ratio() {
-    load_config
-    echo -e "${BLUE}=== 设置平衡比例 ===${PLAIN}"
-    echo -e "当前: 1 : ${YELLOW}${TARGET_RATIO}${PLAIN}"
-    read -p "请输入新比例 (如 1.3): " new_val
-    if [[ "$new_val" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
-        echo "TARGET_RATIO=$new_val" > "$CONF_FILE"
-        echo -e "${GREEN}已保存。${PLAIN}"
-    else echo -e "${RED}无效输入。${PLAIN}"; fi
+    systemctl daemon-reload; systemctl enable traffic_balancer; systemctl restart traffic_balancer
+    echo -e "${GREEN}安装完成！${PLAIN}"
     read -p "按回车继续..."
 }
 
-show_menu() {
+set_parameters() {
     load_config
+    clear
+    echo -e "${BLUE}╔════════════════════════════════════════╗${PLAIN}"
+    echo -e "${BLUE}║           参数配置向导                 ║${PLAIN}"
+    echo -e "${BLUE}╚════════════════════════════════════════╝${PLAIN}"
+    echo -e " 当前状态: 比例 1:${TARGET_RATIO} | 带宽 ${MAX_SPEED_MBPS} Mbps"
+    echo -e ""
+    echo -e "${YELLOW}1. 设置下行比例${PLAIN} (如 1.5)"
+    read -p "   请输入 (留空跳过): " input_ratio
+    echo -e ""
+    echo -e "${YELLOW}2. 设置机器带宽${PLAIN} (如 100M, 1G)"
+    read -p "   请输入 (留空跳过): " input_speed
+    
+    local new_ratio=$TARGET_RATIO
+    if [[ ! -z "$input_ratio" ]]; then
+        local clean_val=$(echo "$input_ratio" | sed 's/^1://')
+        if [[ "$clean_val" =~ ^[0-9]+([.][0-9]+)?$ ]]; then new_ratio=$clean_val; fi
+    fi
+    local new_speed=$MAX_SPEED_MBPS
+    if [[ ! -z "$input_speed" ]]; then
+        local converted=$(convert_to_mb "$input_speed")
+        if [[ "$converted" =~ ^[0-9]+$ ]]; then new_speed=$converted; fi
+    fi
+    echo "TARGET_RATIO=$new_ratio" > "$CONF_FILE"
+    echo "MAX_SPEED_MBPS=$new_speed" >> "$CONF_FILE"
+    if ! grep -q "REGION=" "$CONF_FILE"; then echo "REGION=$REGION" >> "$CONF_FILE"; fi
+    systemctl restart traffic_balancer
+    echo -e "${GREEN}配置已更新！${PLAIN}"; read -p "按回车返回..."
+}
+
+is_installed() {
+    if [ -f "$CONF_FILE" ] && [ -f "$SERVICE_FILE" ]; then return 0; else return 1; fi
+}
+
+require_install() {
+    if ! is_installed; then
+        echo -e ""
+        echo -e " ${RED}⚠️  错误：请先执行 [1] 安装服务！${PLAIN}"
+        echo -e ""
+        read -p " 按回车返回主菜单..."
+        return 1
+    fi
+    return 0
+}
+
+show_menu() {
     while true; do
+        if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
+        [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
+        
         clear
         local iface=$(get_interface); local rx=$(get_bytes rx); local tx=$(get_bytes tx)
-        echo -e "${BLUE}=============================================${PLAIN}"
-        echo -e "${BOLD}           Traffic Balancer Ultimate         ${PLAIN}"
-        echo -e "${BLUE}=============================================${PLAIN}"
-        if systemctl is-active --quiet traffic_balancer; then
-            echo -e "状态: ${GREEN}● 运行中${PLAIN}"
-        else echo -e "状态: ${RED}● 未运行${PLAIN}"; fi
-        echo -e "目标: ${YELLOW}1 : ${TARGET_RATIO}${PLAIN}"
-        echo -e "网卡: ${BOLD}$iface${PLAIN} | 上行: ${YELLOW}$(format_size $tx)${PLAIN} | 下行: ${GREEN}$(format_size $rx)${PLAIN}"
-        echo -e "${BLUE}=============================================${PLAIN}"
-        echo -e " 1. 安装/启动"
-        echo -e " 2. 设置比例"
-        echo -e " 3. 实时面板"
-        echo -e " 4. 查看日志"
+        
+        local status_icon="${RED}● 停止${PLAIN}"
+        if systemctl is-active --quiet traffic_balancer; then status_icon="${GREEN}● 运行中${PLAIN}"; fi
+        
+        local region_txt="未检测"
+        if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; 
+        elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
+
+        echo -e "${BLUE}Traffic Balancer V5.1 (Pro Edition)${PLAIN}"
+        echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo -e " 运行状态 : $status_icon"
+        echo -e " 所在区域 : $region_txt"
+        echo -e " 网卡接口 : $iface"
+        echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        echo -e " 流量统计:"
+        echo -e "   ⬆️  累计上传 : ${YELLOW}$(format_size $tx)${PLAIN}"
+        echo -e "   ⬇️  累计下载 : ${GREEN}$(format_size $rx)${PLAIN}"
+        echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        if is_installed; then
+             echo -e " 当前策略:"
+             echo -e "   🎯 目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
+             echo -e "   🛡️ 带宽保护 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
+             echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        fi
+
+        echo -e " 1. 安装并启动服务"
+        echo -e " 2. 修改策略 (比例 / 带宽)"
+        echo -e " 3. 实时监控面板"
+        echo -e " 4. 查看运行日志"
         echo -e " 5. 重启服务"
         echo -e " 6. 停止服务"
-        echo -e " 7. 卸载"
+        echo -e " 7. 卸载并清理"
         echo -e " 0. 退出"
-        echo -e "---------------------------------------------"
-        read -p "选择: " choice
+        echo -e ""
+        read -p " 请输入选项 [0-7]: " choice
+        
         case $choice in
             1) install_service ;;
-            2) set_ratio ;;
-            3) monitor_dashboard ;;
-            4) tail -f -n 20 "$LOG_FILE" ;;
-            5) systemctl restart traffic_balancer; echo "重启中..."; sleep 1 ;;
-            6) systemctl stop traffic_balancer; echo "已停止"; sleep 1 ;;
-            7) systemctl stop traffic_balancer; systemctl disable traffic_balancer; rm -f "$SERVICE_FILE" "$LOG_FILE"; rm -rf "$WORK_DIR"; echo "已卸载"; read -p "按回车..." ;;
+            2) require_install && set_parameters ;;
+            3) require_install && monitor_dashboard ;;
+            4) require_install && tail -f -n 20 "$LOG_FILE" ;;
+            5) require_install && systemctl restart traffic_balancer && echo "已重启" && sleep 1 ;;
+            6) require_install && systemctl stop traffic_balancer && echo "已停止" && sleep 1 ;;
+            7) 
+                systemctl stop traffic_balancer
+                systemctl disable traffic_balancer
+                rm -f "$SERVICE_FILE" "$LOG_FILE"
+                rm -rf "$WORK_DIR"
+                echo -e "${GREEN}已清理卸载完成。${PLAIN}"
+                read -p "按回车继续..." 
+                ;;
             0) exit 0 ;;
-            *) ;;
+            *) echo -e "${RED}无效输入${PLAIN}"; sleep 1 ;;
         esac
     done
 }
 
 if [[ "$1" == "--worker" ]]; then run_worker; else
-    if [[ $EUID -ne 0 ]]; then echo "请 root 运行"; exit 1; fi
+    if [[ $EUID -ne 0 ]]; then echo "请使用root运行"; exit 1; fi
     show_menu
 fi

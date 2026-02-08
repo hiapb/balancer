@@ -1,9 +1,5 @@
 #!/bin/bash
 
-# =========================================================
-# Traffic Balancer V12 (Compatibility Core)
-# Fix: 修复 curl exit code 2 (初始化失败) 问题
-# =========================================================
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -97,7 +93,7 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V12 核心修复：纯数字限速 ---
+
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     

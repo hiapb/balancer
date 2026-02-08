@@ -92,10 +92,8 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
-    # 强制将限速转换为 MB/s (curl识别格式)
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     
-    # 直接计算需要下载的全部字节，不做任何削减
     local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
     local url=""
@@ -105,11 +103,8 @@ download_noise() {
         local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
     fi
     
-    # 使用新版日志格式
     log "[执行] 缺口:${NEED_MB}MB | 锁定速度:${SPEED_LIMIT_MBPS}Mbps | 预计耗时..."
     
-    # max-time 设置为 3600秒 (1小时)，确保不中断
-    # --limit-rate 严格限制速度
     curl -r 0-$BYTES -L -s -o /dev/null --limit-rate "${RATE_LIMIT_MB}M" --max-time 3600 "$url"
 }
 
@@ -128,7 +123,6 @@ run_worker() {
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
-        # 只要有缺口(>10MB)，就开始执行长连接下载
         if [ $(calc_gt $MISSING 10) -eq 1 ]; then
             log "[监控] 发现缺口:${MISSING}MB -> 启动下载进程"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
@@ -300,7 +294,7 @@ show_menu() {
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V8 (Final) ${PLAIN}"
+        echo -e "${BLUE}   Traffic Balancer V8   ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

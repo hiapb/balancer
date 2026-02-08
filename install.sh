@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer V22 (CDN Stability Core)
-# Fix: 解决测速源主动断开连接问题，改用 CDN 抗揍源
+# Traffic Balancer V23 (OS ISO Camouflage)
+# Core: 仅下载 Linux 系统镜像 (ISO)，模拟真实业务流量
 # =========================================================
 
 RED='\033[31m'
@@ -25,15 +25,32 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- V22 精选：CDN级 抗揍大文件源 (10GB+) ---
-# 这些源基于 CDN，不会因为长连接而主动切断
-URLS_BIG=(
-    "https://speed.cloudflare.com/__down?bytes=10000000000"  # Cloudflare 全球节点
-    "http://ping.online.net/10000Mo.dat"                     # Scaleway 法国骨干
-    "http://speed.hetzner.de/10GB.bin"                       # Hetzner 德国战车
-    "http://speedtest.tele2.net/10GB.zip"                    # Tele2 欧洲电信
-    "http://ipv4.download.thinkbroadband.com/10GB.zip"       # 英国老牌 ISP
-    "http://ash-speed.hetzner.com/10GB.bin"                  # Hetzner 美国节点
+# --- 国内合规源：仅使用大厂系统镜像 ---
+URLS_OS_CN=(
+    # 阿里云 CentOS 7 ISO (4.4GB)
+    "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
+    # 腾讯云 CentOS Stream 9 (8GB)
+    "https://mirrors.cloud.tencent.com/centos-stream/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-dvd1.iso"
+    # 华为云 Ubuntu 22.04 (3.6GB)
+    "https://repo.huaweicloud.com/ubuntu-releases/22.04.4/ubuntu-22.04.4-desktop-amd64.iso"
+    # 清华大学 Debian 12 (3.7GB)
+    "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-dvd/debian-12.5.0-amd64-DVD-1.iso"
+    # 网易 163 CentOS 7 (4.4GB)
+    "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
+)
+
+# --- 国际合规源：官方系统镜像 ---
+URLS_OS_GLOBAL=(
+    # Kernel.org (Linux内核官网) CentOS Stream
+    "https://mirrors.kernel.org/centos-stream/9-stream/BaseOS/x86_64/iso/CentOS-Stream-9-latest-x86_64-dvd1.iso"
+    # Leaseweb (顶级机房) ISO
+    "http://mirror.leaseweb.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
+    # Nvidia (英伟达) Ubuntu 镜像
+    "http://us.download.nvidia.com/tesla/460.106.00/NVIDIA-Linux-x86_64-460.106.00.run"
+    # Ashburn (美国东部枢纽)
+    "http://mirror.math.princeton.edu/pub/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
+    # UK Mirror
+    "http://www.mirrorservice.org/sites/mirror.centos.org/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -83,36 +100,48 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V22 核心下载 ---
-download_stable() {
-    local NEED_MB=$1; local SPEED_LIMIT_MBPS=$2
+# --- V23 核心下载：OS 镜像伪装 ---
+download_iso() {
+    local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
-    local rand_idx=$(($RANDOM % ${#URLS_BIG[@]}))
-    local url=${URLS_BIG[$rand_idx]}
-
-    log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
+    # 严格区分国内外源
+    local target_urls
+    if [ "$CURRENT_REGION" == "CN" ]; then
+        target_urls=("${URLS_OS_CN[@]}")
+    else
+        target_urls=("${URLS_OS_GLOBAL[@]}")
+    fi
     
-    # 核心参数：
-    # --retry 999: 无限重试，直到成功
-    # --retry-delay 5: 重试前等待5秒
-    # --max-time 1200: 20分钟长连接 (大多数CDN的极限)
+    local rand_idx=$(($RANDOM % ${#target_urls[@]}))
+    local url=${target_urls[$rand_idx]}
+
+    # 提取文件名用于显示
+    local filename=$(echo $url | awk -F/ '{print $NF}')
+    local host=$(echo $url | awk -F/ '{print $3}')
+
+    log "[执行] 缺口:${NEED_MB}MB | 伪装:下载系统镜像 | 源:$host"
+    
+    # 使用 -O /dev/null 模拟下载
+    # 强制 IPv4 (-4)
+    # 长连接 10分钟 (--max-time 600)
+    # 严格限速 (--limit-rate)
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --buffer \
-    --max-time 1200 \
+    --max-time 600 \
     --retry 3 \
     --retry-delay 2 \
-    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+    --user-agent "Wget/1.21.3 (linux-gnu)" \
     "$url"
     
     local ret=$?
     if [ $ret -ne 0 ]; then 
-        log "[警告] 连接异常 (Code: $ret)，尝试切换节点..."
+        log "[重试] 镜像源连接断开 (Code: $ret)，准备切换..."
     else
-        log "[完成] 长连接周期结束。"
+        log "[完成] 镜像下载会话结束。"
     fi
 }
 
@@ -120,7 +149,7 @@ run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:V22-CDN稳定版(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V23系统镜像伪装(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -132,8 +161,8 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 50) -eq 1 ]; then
-            log "[监控] 发现缺口:${MISSING}MB -> 启动下载"
-            download_stable $MISSING $MAX_SPEED_MBPS
+            log "[监控] 发现流量缺口 -> 启动伪装下载"
+            download_iso $MISSING $REGION $MAX_SPEED_MBPS
         else
             sleep 10
         fi
@@ -213,8 +242,8 @@ install_service() {
     
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
-    echo -e "  1. 国内 (CN)"
-    echo -e "  2. 国际 (Global) [推荐]"
+    echo -e "  1. 国内 (CN) [推荐:阿里/腾讯/华为ISO]"
+    echo -e "  2. 国际 (Global) [推荐:Kernel/Leaseweb ISO]"
     read -p " 请输入 [默认回车]: " region_choice
     local final_region=$detected
     case $region_choice in 1) final_region="CN" ;; 2) final_region="GLOBAL" ;; esac
@@ -310,7 +339,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V22 (CDN Stable) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V23 (ISO Camouflage) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

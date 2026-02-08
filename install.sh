@@ -1,10 +1,5 @@
 #!/bin/bash
 
-# =========================================================
-# Traffic Balancer
-# =========================================================
-
-# --- 视觉配置 ---
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -14,19 +9,16 @@ CYAN='\033[96m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
-# --- 基础路径 ---
 TARGET_PATH="/root/balancer.sh"
 WORK_DIR="/etc/traffic_balancer"
 CONF_FILE="${WORK_DIR}/config.conf"
 LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
-# --- 默认配置 ---
 DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=60
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 源定义 ---
 URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
@@ -40,9 +32,6 @@ URLS_GLOBAL=(
     "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
 )
 
-# =========================================================
-# 核心算法
-# =========================================================
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
 calc_mul() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a*b}'; }
 calc_sub() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a-b}'; }
@@ -100,9 +89,6 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# =========================================================
-# Worker
-# =========================================================
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     local SAFE_CAP_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.0f", (bw/8) * 60 * 0.8}')
@@ -110,7 +96,7 @@ download_noise() {
     
     if [ $(calc_gt $NEED_MB $SAFE_CAP_MB) -eq 1 ]; then
         REAL_DOWNLOAD=$SAFE_CAP_MB
-        log "[保护] 需求${NEED_MB}MB -> 熔断限制为${SAFE_CAP_MB}MB"
+        log "[保护] 熔断触发：需求${NEED_MB}MB -> 限制为${SAFE_CAP_MB}MB"
     fi
     
     local SINGLE_REQUEST_CAP=300
@@ -149,9 +135,6 @@ run_worker() {
     done
 }
 
-# =========================================================
-# UI 界面
-# =========================================================
 monitor_dashboard() {
     clear; echo "初始化数据..."; local r1=$(get_bytes rx); local t1=$(get_bytes tx)
     while true; do
@@ -179,8 +162,6 @@ ensure_script_file() {
     if [ -f "$TARGET_PATH" ]; then
         return 0
     fi
-    
-    
     if [ -f "$0" ]; then
         cp "$0" "$TARGET_PATH"
         chmod +x "$TARGET_PATH"
@@ -203,20 +184,35 @@ install_service() {
     
     ensure_script_file
     if [ ! -f "$TARGET_PATH" ]; then
-        echo -e "${RED}无法定位脚本文件，安装终止。请按照教程先保存文件。${PLAIN}"
+        echo -e "${RED}无法定位脚本文件，安装终止。${PLAIN}"
         read -p "按回车退出..."
         return
     fi
     
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
+    
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
-    echo "REGION=$detected" >> "$CONF_FILE"
+    local detected_str="国际 (Global)"
+    [ "$detected" == "CN" ] && detected_str="国内 (CN)"
+
+    echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
+    echo -e " 请选择下载源区域:"
+    echo -e "  1. 国内 (CN)"
+    echo -e "  2. 国际 (Global)"
+    read -p " 请输入 [默认回车使用检测值]: " region_choice
+
+    local final_region=$detected
+    case $region_choice in
+        1) final_region="CN" ;;
+        2) final_region="GLOBAL" ;;
+    esac
+    echo "REGION=$final_region" >> "$CONF_FILE"
     
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
-Description=Traffic Balancer V5
+Description=Traffic Balancer
 After=network.target
 [Service]
 Type=simple
@@ -227,7 +223,7 @@ RestartSec=10
 WantedBy=multi-user.target
 EOF
     systemctl daemon-reload; systemctl enable traffic_balancer; systemctl restart traffic_balancer
-    echo -e "${GREEN}安装完成！${PLAIN}"
+    echo -e "${GREEN}安装完成！已选区域: $final_region${PLAIN}"
     read -p "按回车继续..."
 }
 
@@ -285,10 +281,16 @@ show_menu() {
         clear
         local iface=$(get_interface); local rx=$(get_bytes rx); local tx=$(get_bytes tx)
         
-        local status_icon="${RED}● 停止${PLAIN}"
-        if systemctl is-active --quiet traffic_balancer; then status_icon="${GREEN}● 运行中${PLAIN}"; fi
+        local status_icon="${RED}● 未安装${PLAIN}"
+        if is_installed; then
+            if systemctl is-active --quiet traffic_balancer; then
+                status_icon="${GREEN}● 运行中${PLAIN}"
+            else
+                status_icon="${YELLOW}● 已停止${PLAIN}"
+            fi
+        fi
         
-        local region_txt="未检测"
+        local region_txt="未配置"
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; 
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 

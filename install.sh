@@ -15,7 +15,7 @@ CONF_FILE="${WORK_DIR}/config.conf"
 LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
-DEFAULT_RATIO=1.3
+DEFAULT_RATIO=1.2
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 

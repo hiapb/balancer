@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer V19 (Pulse Guard Core)
-# Fix: 解决V18可能超跑的问题。采用60s脉冲机制，既保速度又保精准。
+# Traffic Balancer V21 (Classic Stable)
+# Logic: 单进程 + 严格限速 + 10分钟长连接 + 强制IPv4
 # =========================================================
 
 RED='\033[31m'
@@ -22,16 +22,18 @@ LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
 DEFAULT_RATIO=1.3
-DEFAULT_CHECK_INTERVAL=5
+DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 超大文件源 (不使用Range，模拟真实下载) ---
+# --- 精选全球大带宽源 (10GB+) ---
+# 剔除了不稳定的教育网源，保留商业大带宽源
 URLS_BIG=(
     "http://speedtest-sfo3.digitalocean.com/10gb.test"
     "http://speedtest-ny2.digitalocean.com/10gb.test"
     "http://speedtest-lon1.digitalocean.com/10gb.test"
     "http://proof.ovh.net/files/10Gb.dat"
     "http://ipv4.download.thinkbroadband.com/10GB.zip"
+    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -39,16 +41,6 @@ calc_mul() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a*b}'; }
 calc_sub() { awk -v a="$1" -v b="$2" 'BEGIN {printf "%.2f", a-b}'; }
 calc_gt() { awk -v a="$1" -v b="$2" 'BEGIN {if (a>b) print 1; else print 0}'; }
 calc_lt() { awk -v a="$1" -v b="$2" 'BEGIN {if (a<b) print 1; else print 0}'; }
-
-convert_to_mb() {
-    local input=$(echo "$1" | tr 'a-z' 'A-Z')
-    local val=$(echo "$input" | sed 's/[GM]//g')
-    if [[ "$input" == *"G"* ]]; then
-        awk -v v="$val" 'BEGIN {printf "%.0f", v*1024}'
-    else
-        awk -v v="$val" 'BEGIN {printf "%.0f", v}'
-    fi
-}
 
 format_size() {
     local bytes=$1; [ -z "$bytes" ] && bytes=0
@@ -91,38 +83,46 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V19 核心：60秒脉冲下载 ---
-download_pulse() {
+# --- V21 核心：经典单进程 + 严格限速 ---
+download_classic() {
     local NEED_MB=$1; local SPEED_LIMIT_MBPS=$2
     
-    # 纯数字限速 (Bytes/s)
+    # 1. 计算限速 (Mbps -> Bytes/s)
+    # 公式: Mbps / 8 * 1024 * 1024
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
-    # 随机选一个10GB大文件
+    # 随机选源
     local rand_idx=$(($RANDOM % ${#URLS_BIG[@]}))
     local url=${URLS_BIG[$rand_idx]}
 
-    log "[执行] 缺口:${NEED_MB}MB | 目标:$(echo $url | awk -F/ '{print $3}') | 60秒脉冲下载..."
+    log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
     
     # 核心参数：
-    # --max-time 60: 强制只跑60秒。
-    # 这意味着每分钟脚本都会重新拿回控制权，判断是否还需要继续下。
-    # 这样既保证了大文件的速度，又防止了刹不住车。
+    # --limit-rate: 严格限制速度，绝不超速
+    # --max-time 600: 每次跑10分钟，保证连接稳定
+    # -4: 强制 IPv4，解决国内 DNS/连接 超时问题
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --buffer \
-    --max-time 60 \
+    --max-time 600 \
+    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
     "$url"
     
-    # 60秒后 curl 会因为超时自动退出，这是正常的
+    local ret=$?
+    # Code 28 是超时，Code 56 是接收失败
+    if [ $ret -ne 0 ] && [ $ret -ne 28 ]; then 
+        log "[提示] 下载中断 (代码: $ret)，准备下一轮。"
+    else
+        log "[完成] 本轮任务结束 (10分钟或下载完成)"
+    fi
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:V19脉冲守护(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V21经典稳定(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -133,16 +133,13 @@ run_worker() {
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
-        # 只要有缺口，就开启下载
         if [ $(calc_gt $MISSING 50) -eq 1 ]; then
-            log "[监控] 缺口:${MISSING}MB -> 启动60s下载"
-            download_pulse $MISSING $MAX_SPEED_MBPS
+            log "[监控] 发现缺口:${MISSING}MB -> 启动下载"
+            download_classic $MISSING $MAX_SPEED_MBPS
         else
-            # 如果达标了，休息久一点
             sleep 10
         fi
-        # 极短间隔，确保循环
-        sleep 1
+        sleep 2
     done
 }
 
@@ -219,7 +216,7 @@ install_service() {
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
     echo -e "  1. 国内 (CN)"
-    echo -e "  2. 国际 (Global)"
+    echo -e "  2. 国际 (Global) [推荐]"
     read -p " 请输入 [默认回车]: " region_choice
     local final_region=$detected
     case $region_choice in 1) final_region="CN" ;; 2) final_region="GLOBAL" ;; esac
@@ -315,7 +312,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V19 (Pulse Guard) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V21 (Classic) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -329,7 +326,7 @@ show_menu() {
         if is_installed; then
              echo -e " 当前策略:"
              echo -e "   目标比例 : ${BOLD}1 : ${TARGET_RATIO}${PLAIN}"
-             echo -e "   速度限制 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN} (单线脉冲)"
+             echo -e "   速度限制 : ${BOLD}${MAX_SPEED_MBPS} Mbps${PLAIN}"
              echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         fi
 

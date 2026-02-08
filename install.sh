@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# =========================================================
+# Traffic Balancer V13 (Range-Free Core)
+# Fix: 修复 Range 头导致的 416 错误 / 强制 IPv4
+# =========================================================
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -20,20 +24,20 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
+# --- 纯净大文件源 ---
 URLS_CN=(
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
 )
 
+# 移除小文件，只保留最大的测试文件
 URLS_GLOBAL=(
-    "https://speed.cloudflare.com/__down?bytes=5000000000"
-    "http://speedtest-sfo3.digitalocean.com/10000mb.test"
-    "http://mirror.leaseweb.com/speedtest/10000mb.bin"
-    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+    "http://speedtest-sfo3.digitalocean.com/10gb.test"
+    "http://speedtest-ny2.digitalocean.com/10gb.test"
+    "http://speedtest-lon1.digitalocean.com/10gb.test"
     "http://proof.ovh.net/files/10Gb.dat"
+    "http://ipv4.download.thinkbroadband.com/1GB.zip"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -76,7 +80,8 @@ check_dependencies() {
 }
 
 detect_region() {
-    local info=$(curl -s --max-time 5 ipinfo.io || true)
+    # 增加超时和重试，防止卡死
+    local info=$(curl -s --max-time 5 --retry 2 ipinfo.io || true)
     local country=$(echo "$info" | awk -F'"' '/"country":/ {print $4; exit}')
     [[ "$country" == "CN" ]] && echo "CN" || echo "GLOBAL"
 }
@@ -93,18 +98,13 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-
+# --- V13 核心：移除 Range，强制 IPv4 ---
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
-    # 1. 计算限速值 (MB/s)
+    # 计算限速 B/s
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
-    
-    # 2. 转换为字节单位 (Bytes/s)，兼容老旧curl
-    # 1 MB = 1048576 Bytes
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
-    
-    local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
     local target_urls
     if [ "$CURRENT_REGION" == "CN" ]; then
@@ -116,27 +116,31 @@ download_noise() {
     local rand_idx=$(($RANDOM % ${#target_urls[@]}))
     local url=${target_urls[$rand_idx]}
 
-    log "[尝试] 目标: ...$(echo $url | awk -F/ '{print $3}') | 限速: ${RATE_LIMIT_BYTES} B/s"
+    log "[执行] 缺口:${NEED_MB}MB | 目标:$(echo $url | awk -F/ '{print $3}') | 限速:${SPEED_LIMIT_MBPS}Mbps"
     
-    # 移除 -k, -L, --retry 等可能导致不兼容的参数，只保留最核心的
-    # 使用纯数字作为 limit-rate
-    curl -r 0-$BYTES -s -o /dev/null \
+    # 核心修改：
+    # 1. 移除 -r (Range)，避免服务器拒绝
+    # 2. 添加 -4，强制使用 IPv4，修复 Code 6
+    # 3. 添加 --limit-rate (字节单位)，兼容所有版本
+    curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --max-time 600 \
     "$url"
     
     local ret=$?
     if [ $ret -ne 0 ]; then
-        log "[错误] 下载失败 (代码: $ret)"
+        log "[警告] 下载中断 (Code: $ret) - 正在切换源重试..."
     else
-        log "[完成] 下载结束"
+        log "[完成] 时间片段结束，准备下一轮检查。"
     fi
 }
 
 run_worker() {
     load_config
-    if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:V12兼容版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    # 如果检测不到区域，默认 GLOBAL
+    if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
+    
+    log "[启动] 模式:V13救赎版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -149,7 +153,7 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 10) -eq 1 ]; then
-            log "[监控] 发现缺口:${MISSING}MB -> 启动下载"
+            log "[监控] 缺口:${MISSING}MB -> 开始下载"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
             sleep 10
@@ -310,7 +314,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V12 (Final) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V13 (Final) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

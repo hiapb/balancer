@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# =========================================================
+# Traffic Balancer V11 (Failover Core)
+# =========================================================
+
 RED='\033[31m'
 GREEN='\033[32m'
 YELLOW='\033[33m'
@@ -19,11 +23,13 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
+# --- 增强型源列表 (自动轮询) ---
 URLS_CN=(
+    "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
 )
 
 URLS_GLOBAL=(
@@ -31,6 +37,7 @@ URLS_GLOBAL=(
     "http://speedtest-sfo3.digitalocean.com/10000mb.test"
     "http://mirror.leaseweb.com/speedtest/10000mb.bin"
     "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+    "http://proof.ovh.net/files/10Gb.dat"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -90,33 +97,47 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
+# --- V11 核心：失败自动切换源 ---
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
-    local url=""
+    # 根据区域选择源列表
+    local target_urls
     if [ "$CURRENT_REGION" == "CN" ]; then
-        local idx=$(($RANDOM % ${#URLS_CN[@]})); url=${URLS_CN[$idx]}
+        target_urls=("${URLS_CN[@]}")
     else
-        local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
+        target_urls=("${URLS_GLOBAL[@]}")
     fi
     
-    # 立即记录日志，表明动作开始
-    log "[执行] 缺口:${NEED_MB}MB | 速度:${SPEED_LIMIT_MBPS}Mbps | 立即开始下载..."
+    # 随机打乱数组，避免每次都死磕同一个坏源
+    local rand_idx=$(($RANDOM % ${#target_urls[@]}))
+    local url=${target_urls[$rand_idx]}
+
+    log "[尝试] 目标源: ...$(echo $url |  awk -F/ '{print $3}') | 限速:${SPEED_LIMIT_MBPS}Mbps"
     
+    # 执行下载，如果失败记录错误码
     curl -r 0-$BYTES -L -k -s -o /dev/null \
     --limit-rate "${RATE_LIMIT_MB}M" \
     --max-time 600 \
+    --retry 2 \
     --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
     "$url"
+    
+    local ret=$?
+    if [ $ret -ne 0 ]; then
+        log "[错误] 下载失败 (代码: $ret). 可能源不可用或网络中断。"
+    else
+        log "[完成] 单次任务结束。"
+    fi
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:急速版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V11故障转移 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -129,14 +150,11 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 10) -eq 1 ]; then
-            log "[监控] 发现缺口:${MISSING}MB -> 触发下载"
+            log "[监控] 发现缺口:${MISSING}MB -> 启动下载"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
-            # 只有在不需要下载时，才进行长睡眠
             sleep 10
         fi
-        
-        # 循环末尾加一个极短的缓冲，防止curl瞬间失败导致的CPU空转，但不影响正常启动速度
         sleep 2
     done
 }
@@ -171,55 +189,39 @@ view_logs() {
 }
 
 ensure_script_file() {
-    if [ -f "$TARGET_PATH" ]; then
-        return 0
-    fi
+    if [ -f "$TARGET_PATH" ]; then return 0; fi
     if [ -f "$0" ]; then
-        cp "$0" "$TARGET_PATH"
-        chmod +x "$TARGET_PATH"
+        cp "$0" "$TARGET_PATH"; chmod +x "$TARGET_PATH"
         echo -e "${GREEN}已将脚本复制到 $TARGET_PATH${PLAIN}"
     else
-        echo -e "${YELLOW}正在从 GitHub 下载完整脚本到 $TARGET_PATH ...${PLAIN}"
+        echo -e "${YELLOW}正在从 GitHub 下载完整脚本...${PLAIN}"
         curl -o "$TARGET_PATH" -L https://raw.githubusercontent.com/hiapb/balancer/main/install.sh
         chmod +x "$TARGET_PATH"
-        if [ -f "$TARGET_PATH" ]; then
-            echo -e "${GREEN}下载成功！${PLAIN}"
-        else
-            echo -e "${RED}下载失败，请手动执行: curl -o /root/balancer.sh ...${PLAIN}"
-            return 1
+        if [ ! -f "$TARGET_PATH" ]; then
+            echo -e "${RED}下载失败，请手动执行: curl -o /root/balancer.sh ...${PLAIN}"; return 1
         fi
+        echo -e "${GREEN}下载成功！${PLAIN}"
     fi
 }
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"
-    
     ensure_script_file
-    if [ ! -f "$TARGET_PATH" ]; then
-        echo -e "${RED}无法定位脚本文件，安装终止。${PLAIN}"
-        read -p "按回车退出..."
-        return
-    fi
+    if [ ! -f "$TARGET_PATH" ]; then echo -e "${RED}文件丢失，安装终止。${PLAIN}"; read -p "回车退出..."; return; fi
     
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
-    
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
-    local detected_str="国际 (Global)"
-    [ "$detected" == "CN" ] && detected_str="国内 (CN)"
-
+    local detected_str="国际 (Global)"; [ "$detected" == "CN" ] && detected_str="国内 (CN)"
+    
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
-    echo -e "  1. 国内 (CN) [推荐:清华/中科大源]"
+    echo -e "  1. 国内 (CN) [推荐]"
     echo -e "  2. 国际 (Global)"
-    read -p " 请输入 [默认回车使用检测值]: " region_choice
-
+    read -p " 请输入 [默认回车]: " region_choice
     local final_region=$detected
-    case $region_choice in
-        1) final_region="CN" ;;
-        2) final_region="GLOBAL" ;;
-    esac
+    case $region_choice in 1) final_region="CN" ;; 2) final_region="GLOBAL" ;; esac
     echo "REGION=$final_region" >> "$CONF_FILE"
     
     cat > "$SERVICE_FILE" <<EOF
@@ -240,8 +242,7 @@ EOF
 }
 
 set_parameters() {
-    load_config
-    clear
+    load_config; clear
     echo -e "${BLUE}╔════════════════════════════════════════╗${PLAIN}"
     echo -e "${BLUE}║           参数配置向导                 ║${PLAIN}"
     echo -e "${BLUE}╚════════════════════════════════════════╝${PLAIN}"
@@ -276,13 +277,29 @@ is_installed() {
 
 require_install() {
     if ! is_installed; then
-        echo -e ""
-        echo -e " ${RED}⚠️  错误：请先执行 [1] 安装服务！${PLAIN}"
-        echo -e ""
-        read -p " 按回车返回主菜单..."
-        return 1
+        echo -e "\n ${RED}⚠️  错误：请先执行 [1] 安装服务！${PLAIN}\n"; read -p " 按回车返回..."; return 1
     fi
     return 0
+}
+
+# 强力卸载函数
+uninstall_clean() {
+    echo -e "${YELLOW}正在停止服务...${PLAIN}"
+    systemctl stop traffic_balancer
+    systemctl disable traffic_balancer
+    
+    echo -e "${YELLOW}正在清理残留进程...${PLAIN}"
+    # 杀掉可能卡住的 curl 或 脚本进程
+    pkill -f "balancer.sh"
+    
+    echo -e "${YELLOW}正在删除文件...${PLAIN}"
+    rm -f "$SERVICE_FILE" "$LOG_FILE"
+    rm -rf "$WORK_DIR"
+    rm -f "$TARGET_PATH" # 连自己也删掉
+    
+    systemctl daemon-reload
+    echo -e "${GREEN}✅ 卸载完成。所有文件和进程已清除。${PLAIN}"
+    exit 0
 }
 
 show_menu() {
@@ -292,22 +309,16 @@ show_menu() {
         
         clear
         local iface=$(get_interface); local rx=$(get_bytes rx); local tx=$(get_bytes tx)
-        
         local status_icon="${RED}● 未安装${PLAIN}"
         if is_installed; then
-            if systemctl is-active --quiet traffic_balancer; then
-                status_icon="${GREEN}● 运行中${PLAIN}"
-            else
-                status_icon="${YELLOW}● 已停止${PLAIN}"
-            fi
+            if systemctl is-active --quiet traffic_balancer; then status_icon="${GREEN}● 运行中${PLAIN}"; else status_icon="${YELLOW}● 已停止${PLAIN}"; fi
         fi
         
         local region_txt="未配置"
-        if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; 
-        elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
+        if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE}     Traffic Balancer    ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V11 (Final) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -331,7 +342,7 @@ show_menu() {
         echo -e " 4. 查看运行日志"
         echo -e " 5. 重启服务"
         echo -e " 6. 停止服务"
-        echo -e " 7. 卸载并清理"
+        echo -e " 7. 彻底卸载 (删除所有)"
         echo -e " 0. 退出"
         echo -e ""
         read -p " 请输入选项 [0-7]: " choice
@@ -343,14 +354,7 @@ show_menu() {
             4) require_install && view_logs ;;
             5) require_install && systemctl restart traffic_balancer && echo "已重启" && sleep 1 ;;
             6) require_install && systemctl stop traffic_balancer && echo "已停止" && sleep 1 ;;
-            7) 
-                systemctl stop traffic_balancer
-                systemctl disable traffic_balancer
-                rm -f "$SERVICE_FILE" "$LOG_FILE"
-                rm -rf "$WORK_DIR"
-                echo -e "${GREEN}已清理卸载完成。${PLAIN}"
-                exit 0 
-                ;;
+            7) uninstall_clean ;;
             0) exit 0 ;;
             *) echo -e "${RED}无效输入${PLAIN}"; sleep 1 ;;
         esac

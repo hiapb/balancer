@@ -20,9 +20,10 @@ DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
 URLS_CN=(
+    "https://mirrors.tuna.tsinghua.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "https://mirrors.ustc.edu.cn/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
     "https://mirrors.aliyun.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.cloud.tencent.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
-    "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
+    "http://mirrors.163.com/centos/7/isos/x86_64/CentOS-7-x86_64-Minimal-2009.iso"
 )
 
 URLS_GLOBAL=(
@@ -93,7 +94,6 @@ download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
-    
     local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
     local url=""
@@ -103,17 +103,22 @@ download_noise() {
         local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
     fi
     
-    log "[执行] 缺口:${NEED_MB}MB | 锁定速度:${SPEED_LIMIT_MBPS}Mbps | 预计耗时..."
+    # 立即记录日志，表明动作开始
+    log "[执行] 缺口:${NEED_MB}MB | 速度:${SPEED_LIMIT_MBPS}Mbps | 立即开始下载..."
     
-    curl -r 0-$BYTES -L -s -o /dev/null --limit-rate "${RATE_LIMIT_MB}M" --max-time 3600 "$url"
+    curl -r 0-$BYTES -L -k -s -o /dev/null \
+    --limit-rate "${RATE_LIMIT_MB}M" \
+    --max-time 600 \
+    --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
+    "$url"
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:无限制补齐 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:急速版 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    
     while true; do
-        sleep 5 
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
         [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
         
@@ -124,11 +129,15 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 10) -eq 1 ]; then
-            log "[监控] 发现缺口:${MISSING}MB -> 启动下载进程"
+            log "[监控] 发现缺口:${MISSING}MB -> 触发下载"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
-            sleep 30
+            # 只有在不需要下载时，才进行长睡眠
+            sleep 10
         fi
+        
+        # 循环末尾加一个极短的缓冲，防止curl瞬间失败导致的CPU空转，但不影响正常启动速度
+        sleep 2
     done
 }
 
@@ -157,11 +166,8 @@ monitor_dashboard() {
 
 view_logs() {
     clear
-    echo -e "${BLUE}=== 最近 50 条日志 ===${PLAIN}"
-    tail -n 50 "$LOG_FILE"
-    echo -e "${BLUE}======================${PLAIN}"
-    echo -e ""
-    read -p "按回车键返回主菜单..."
+    echo -e "${BLUE}=== 最近 50 条日志 (按 q 或 Ctrl+C 退出查看) ===${PLAIN}"
+    tail -n 50 -f "$LOG_FILE" 
 }
 
 ensure_script_file() {
@@ -187,29 +193,35 @@ ensure_script_file() {
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"
+    
     ensure_script_file
     if [ ! -f "$TARGET_PATH" ]; then
         echo -e "${RED}无法定位脚本文件，安装终止。${PLAIN}"
         read -p "按回车退出..."
         return
     fi
+    
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
+    
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
     local detected_str="国际 (Global)"
     [ "$detected" == "CN" ] && detected_str="国内 (CN)"
+
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
-    echo -e "  1. 国内 (CN)"
+    echo -e "  1. 国内 (CN) [推荐:清华/中科大源]"
     echo -e "  2. 国际 (Global)"
     read -p " 请输入 [默认回车使用检测值]: " region_choice
+
     local final_region=$detected
     case $region_choice in
         1) final_region="CN" ;;
         2) final_region="GLOBAL" ;;
     esac
     echo "REGION=$final_region" >> "$CONF_FILE"
+    
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Traffic Balancer
@@ -218,7 +230,7 @@ After=network.target
 Type=simple
 ExecStart=/bin/bash $TARGET_PATH --worker
 Restart=always
-RestartSec=10
+RestartSec=3
 [Install]
 WantedBy=multi-user.target
 EOF
@@ -240,6 +252,7 @@ set_parameters() {
     echo -e ""
     echo -e "${YELLOW}2. 设置速度限制${PLAIN} (如 100M, 1G)"
     read -p "   请输入 (留空跳过): " input_speed
+    
     local new_ratio=$TARGET_RATIO
     if [[ ! -z "$input_ratio" ]]; then
         local clean_val=$(echo "$input_ratio" | sed 's/^1://')
@@ -294,7 +307,7 @@ show_menu() {
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE}   Traffic Balancer V8   ${PLAIN}"
+        echo -e "${BLUE}     Traffic Balancer    ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

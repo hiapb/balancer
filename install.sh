@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer V21 (Classic Stable)
-# Logic: 单进程 + 严格限速 + 10分钟长连接 + 强制IPv4
+# Traffic Balancer V22 (CDN Stability Core)
+# Fix: 解决测速源主动断开连接问题，改用 CDN 抗揍源
 # =========================================================
 
 RED='\033[31m'
@@ -25,15 +25,15 @@ DEFAULT_RATIO=1.3
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# --- 精选全球大带宽源 (10GB+) ---
-# 剔除了不稳定的教育网源，保留商业大带宽源
+# --- V22 精选：CDN级 抗揍大文件源 (10GB+) ---
+# 这些源基于 CDN，不会因为长连接而主动切断
 URLS_BIG=(
-    "http://speedtest-sfo3.digitalocean.com/10gb.test"
-    "http://speedtest-ny2.digitalocean.com/10gb.test"
-    "http://speedtest-lon1.digitalocean.com/10gb.test"
-    "http://proof.ovh.net/files/10Gb.dat"
-    "http://ipv4.download.thinkbroadband.com/10GB.zip"
-    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
+    "https://speed.cloudflare.com/__down?bytes=10000000000"  # Cloudflare 全球节点
+    "http://ping.online.net/10000Mo.dat"                     # Scaleway 法国骨干
+    "http://speed.hetzner.de/10GB.bin"                       # Hetzner 德国战车
+    "http://speedtest.tele2.net/10GB.zip"                    # Tele2 欧洲电信
+    "http://ipv4.download.thinkbroadband.com/10GB.zip"       # 英国老牌 ISP
+    "http://ash-speed.hetzner.com/10GB.bin"                  # Hetzner 美国节点
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -83,38 +83,36 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# --- V21 核心：经典单进程 + 严格限速 ---
-download_classic() {
+# --- V22 核心下载 ---
+download_stable() {
     local NEED_MB=$1; local SPEED_LIMIT_MBPS=$2
     
-    # 1. 计算限速 (Mbps -> Bytes/s)
-    # 公式: Mbps / 8 * 1024 * 1024
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     local RATE_LIMIT_BYTES=$(awk -v mb="$RATE_LIMIT_MB" 'BEGIN {printf "%.0f", mb*1048576}')
     
-    # 随机选源
     local rand_idx=$(($RANDOM % ${#URLS_BIG[@]}))
     local url=${URLS_BIG[$rand_idx]}
 
     log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
     
     # 核心参数：
-    # --limit-rate: 严格限制速度，绝不超速
-    # --max-time 600: 每次跑10分钟，保证连接稳定
-    # -4: 强制 IPv4，解决国内 DNS/连接 超时问题
+    # --retry 999: 无限重试，直到成功
+    # --retry-delay 5: 重试前等待5秒
+    # --max-time 1200: 20分钟长连接 (大多数CDN的极限)
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --buffer \
-    --max-time 600 \
+    --max-time 1200 \
+    --retry 3 \
+    --retry-delay 2 \
     --user-agent "Mozilla/5.0 (Windows NT 10.0; Win64; x64)" \
     "$url"
     
     local ret=$?
-    # Code 28 是超时，Code 56 是接收失败
-    if [ $ret -ne 0 ] && [ $ret -ne 28 ]; then 
-        log "[提示] 下载中断 (代码: $ret)，准备下一轮。"
+    if [ $ret -ne 0 ]; then 
+        log "[警告] 连接异常 (Code: $ret)，尝试切换节点..."
     else
-        log "[完成] 本轮任务结束 (10分钟或下载完成)"
+        log "[完成] 长连接周期结束。"
     fi
 }
 
@@ -122,7 +120,7 @@ run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); [ -z "$REGION" ] && REGION="GLOBAL"; echo "REGION=$REGION" >> "$CONF_FILE"; fi
     
-    log "[启动] 模式:V21经典稳定(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:V22-CDN稳定版(tb) | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -135,7 +133,7 @@ run_worker() {
         
         if [ $(calc_gt $MISSING 50) -eq 1 ]; then
             log "[监控] 发现缺口:${MISSING}MB -> 启动下载"
-            download_classic $MISSING $MAX_SPEED_MBPS
+            download_stable $MISSING $MAX_SPEED_MBPS
         else
             sleep 10
         fi
@@ -312,7 +310,7 @@ show_menu() {
         if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V21 (Classic) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V22 (CDN Stable) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"

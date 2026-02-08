@@ -92,8 +92,10 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     
+    # 强制将限速转换为 MB/s (curl识别格式)
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
     
+    # 直接计算需要下载的全部字节，不做任何削减
     local BYTES=$(awk -v mb="$NEED_MB" 'BEGIN {printf "%.0f", mb*1024*1024}')
     
     local url=""
@@ -103,15 +105,18 @@ download_noise() {
         local idx=$(($RANDOM % ${#URLS_GLOBAL[@]})); url=${URLS_GLOBAL[$idx]}
     fi
     
-    log "[执行] 缺口:${NEED_MB}MB | 锁定速度:${SPEED_LIMIT_MBPS}Mbps | 持续下载中..."
+    # 使用新版日志格式
+    log "[执行] 缺口:${NEED_MB}MB | 锁定速度:${SPEED_LIMIT_MBPS}Mbps | 预计耗时..."
     
-    curl -r 0-$BYTES -L -s -o /dev/null --limit-rate "${RATE_LIMIT_MB}M" --max-time 600 "$url"
+    # max-time 设置为 3600秒 (1小时)，确保不中断
+    # --limit-rate 严格限制速度
+    curl -r 0-$BYTES -L -s -o /dev/null --limit-rate "${RATE_LIMIT_MB}M" --max-time 3600 "$url"
 }
 
 run_worker() {
     load_config
     if [ -z "$REGION" ]; then REGION=$(detect_region); echo "REGION=$REGION" >> "$CONF_FILE"; fi
-    log "[启动] 模式:暴力补齐 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:无限制补齐 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     while true; do
         sleep 5 
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
@@ -123,8 +128,8 @@ run_worker() {
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
-        # 只要有缺口(>50MB)，就死命下
-        if [ $(calc_gt $MISSING 50) -eq 1 ]; then
+        # 只要有缺口(>10MB)，就开始执行长连接下载
+        if [ $(calc_gt $MISSING 10) -eq 1 ]; then
             log "[监控] 发现缺口:${MISSING}MB -> 启动下载进程"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
         else
@@ -156,6 +161,15 @@ monitor_dashboard() {
     done
 }
 
+view_logs() {
+    clear
+    echo -e "${BLUE}=== 最近 50 条日志 ===${PLAIN}"
+    tail -n 50 "$LOG_FILE"
+    echo -e "${BLUE}======================${PLAIN}"
+    echo -e ""
+    read -p "按回车键返回主菜单..."
+}
+
 ensure_script_file() {
     if [ -f "$TARGET_PATH" ]; then
         return 0
@@ -179,35 +193,29 @@ ensure_script_file() {
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"
-    
     ensure_script_file
     if [ ! -f "$TARGET_PATH" ]; then
         echo -e "${RED}无法定位脚本文件，安装终止。${PLAIN}"
         read -p "按回车退出..."
         return
     fi
-    
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
-    
     echo -e "${YELLOW}正在探测网络环境...${PLAIN}"
     local detected=$(detect_region)
     local detected_str="国际 (Global)"
     [ "$detected" == "CN" ] && detected_str="国内 (CN)"
-
     echo -e " 检测到区域: ${BOLD}$detected_str${PLAIN}"
     echo -e " 请选择下载源区域:"
     echo -e "  1. 国内 (CN)"
     echo -e "  2. 国际 (Global)"
     read -p " 请输入 [默认回车使用检测值]: " region_choice
-
     local final_region=$detected
     case $region_choice in
         1) final_region="CN" ;;
         2) final_region="GLOBAL" ;;
     esac
     echo "REGION=$final_region" >> "$CONF_FILE"
-    
     cat > "$SERVICE_FILE" <<EOF
 [Unit]
 Description=Traffic Balancer
@@ -238,7 +246,6 @@ set_parameters() {
     echo -e ""
     echo -e "${YELLOW}2. 设置速度限制${PLAIN} (如 100M, 1G)"
     read -p "   请输入 (留空跳过): " input_speed
-    
     local new_ratio=$TARGET_RATIO
     if [[ ! -z "$input_ratio" ]]; then
         local clean_val=$(echo "$input_ratio" | sed 's/^1://')
@@ -293,7 +300,7 @@ show_menu() {
         elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
 
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE} Traffic Balancer V7 (Stable) ${PLAIN}"
+        echo -e "${BLUE} Traffic Balancer V8 (Final) ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         echo -e " 所在区域 : $region_txt"
@@ -326,7 +333,7 @@ show_menu() {
             1) install_service ;;
             2) require_install && set_parameters ;;
             3) require_install && monitor_dashboard ;;
-            4) require_install && tail -f -n 20 "$LOG_FILE" ;;
+            4) require_install && view_logs ;;
             5) require_install && systemctl restart traffic_balancer && echo "已重启" && sleep 1 ;;
             6) require_install && systemctl stop traffic_balancer && echo "已停止" && sleep 1 ;;
             7) 
@@ -335,7 +342,7 @@ show_menu() {
                 rm -f "$SERVICE_FILE" "$LOG_FILE"
                 rm -rf "$WORK_DIR"
                 echo -e "${GREEN}已清理卸载完成。${PLAIN}"
-                read -p "按回车继续..." 
+                exit 0 
                 ;;
             0) exit 0 ;;
             *) echo -e "${RED}无效输入${PLAIN}"; sleep 1 ;;

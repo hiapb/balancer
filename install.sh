@@ -30,6 +30,10 @@ DEFAULT_MAX_SPEED_MBPS=10
 DEFAULT_URLS_CN=(
     "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso"
     "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
+    "https://mirrors.163.com/archlinux/iso/latest/archlinux-x86_64.iso"
+    "https://dldir1.qq.com/qqfile/qq/PCQQ9.7.17/QQ9.7.17.29225.exe"
+    "https://wirelesscdn-download.xuexi.cn/publish/xuexi_android/latest/xuexi_android_10002068.apk"
+    "https://wirelesscdn-download.xuexi.cn/publish/xuexi_android/latest/xuexi_android_10002068.apk"
 )
 
 # === 内置国际源 (Global) 

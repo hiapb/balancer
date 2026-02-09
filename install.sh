@@ -82,7 +82,7 @@ load_config() {
         ACTIVE_URL_MODE="DEFAULT"
         CUSTOM_URL_VAL=""
     fi
-    [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
+    [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=10
     [ -z "$ACTIVE_URL_MODE" ] && ACTIVE_URL_MODE="DEFAULT"
 }
 
@@ -128,7 +128,7 @@ run_worker() {
     log "[启动] 模式:限速下载 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
-        [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
+        [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=10
         
         local RX_TOTAL=$(get_bytes rx); local TX_TOTAL=$(get_bytes tx)
         local TX_MB=$(calc_div $TX_TOTAL 1048576); local RX_MB=$(calc_div $RX_TOTAL 1048576)
@@ -258,7 +258,7 @@ set_parameters() {
     echo -e "${YELLOW}1. 设置下行比例${PLAIN} (如 1.5)"
     read -p "   请输入 (留空跳过): " input_ratio
     echo -e ""
-    echo -e "${YELLOW}2. 设置速度限制${PLAIN} (如 100M, 1G)"
+    echo -e "${YELLOW}2. 设置速度限制${PLAIN} (如 20M, 1G)"
     read -p "   请输入 (留空跳过): " input_speed
     
     if [ ! -z "$input_ratio" ]; then 

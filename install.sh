@@ -136,16 +136,17 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 50) -eq 1 ]; then
-           log "[监控] 缺口:${MISSING}MB -> 启动下载"
-           download_noise $MISSING $REGION $MAX_SPEED_MBPS
-    
-           SLEEP_TIME=$(shuf -i 120-300 -n 1)
-          log "[保护] 下载结束，进入冷却模式，暂停 ${SLEEP_TIME} 秒..."
-          sleep $SLEEP_TIME
-    
-       else
-          sleep 10
-       fi
+            log "[监控] 缺口:${MISSING}MB -> 启动下载"
+            download_noise $MISSING $REGION $MAX_SPEED_MBPS
+            
+            SLEEP_TIME=$((120 + RANDOM % 181))
+            
+            log "[保护] 下载结束，进入冷却模式，暂停 ${SLEEP_TIME} 秒..."
+            sleep $SLEEP_TIME
+            
+        else
+            sleep 10
+        fi
         sleep 2
     done
 }

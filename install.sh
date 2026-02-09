@@ -129,23 +129,24 @@ download_noise() {
 run_worker() {
     load_config
     [ -z "$REGION" ] && echo "REGION=$(detect_region)" >> "$CONF_FILE"
-    log "[启动] 模式:智能节流 | 阈值:512MB | 限速:${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:智能省流版 | 颗粒度:1min | 满10min冷却| 阈值:512MB | 限速:${MAX_SPEED_MBPS}Mbps"
     
     local LAST_TX=$(get_bytes tx)
+    local ACCUMULATED_TIME=0  # 累计下载分钟数
 
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
         [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=10
         
-        sleep 5
+        sleep 10
         local CUR_TX=$(get_bytes tx)
         local DIFF_TX=$((CUR_TX - LAST_TX))
         LAST_TX=$CUR_TX
-        
-        local TX_SPEED_KBS=$(awk -v diff="$DIFF_TX" 'BEGIN {printf "%.0f", diff/1024/5}')
+        local TX_SPEED_KBS=$(awk -v diff="$DIFF_TX" 'BEGIN {printf "%.0f", diff/1024/10}')
         
         if [ "$TX_SPEED_KBS" -lt 128 ]; then
-            sleep 10
+            ACCUMULATED_TIME=0 
+            sleep 50 
             continue
         fi
 
@@ -155,17 +156,27 @@ run_worker() {
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 512) -eq 1 ]; then
-            log "[监控] 速率:${TX_SPEED_KBS}KB/s | 缺口:${MISSING}MB -> 补货"
-            download_noise $MISSING $REGION $MAX_SPEED_MBPS
+            log "[执行] 速率:${TX_SPEED_KBS}KB/s | 进度:${ACCUMULATED_TIME}/10min | 补货中..."
             
-            SLEEP_TIME=$((120 + RANDOM % 181))
-            log "[保护] 任务完成，冷却 ${SLEEP_TIME} 秒..."
-            sleep $SLEEP_TIME
-            LAST_TX=$(get_bytes tx)
+            local RATE_LIMIT_BYTES=$(awk -v mb="$MAX_SPEED_MBPS" 'BEGIN {printf "%.0f", (mb/8)*1048576}')
+            local target_urls=("${DEFAULT_URLS_CN[@]}")
+            local url=${target_urls[$RANDOM % ${#target_urls[@]}]}
+            
+            curl -L -k -4 -s -o /dev/null --limit-rate "$RATE_LIMIT_BYTES" --max-time 60 "$url"
+            
+            ((ACCUMULATED_TIME++)) 
+            
+            if [ $ACCUMULATED_TIME -ge 10 ]; then
+                SLEEP_TIME=$((120 + RANDOM % 181))
+                log "[冷却] 已满 10 分钟，强制休息 ${SLEEP_TIME} 秒..."
+                sleep $SLEEP_TIME
+                ACCUMULATED_TIME=0 
+                LAST_TX=$(get_bytes tx) 
+            fi
         else
+            ACCUMULATED_TIME=0
             sleep 10
         fi
-        sleep 2
     done
 }
 

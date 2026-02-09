@@ -13,6 +13,7 @@ CYAN='\033[96m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
+# 更新地址
 UPDATE_URL="https://raw.githubusercontent.com/hiapb/balancer/main/install.sh"
 
 TARGET_PATH="/root/balancer.sh"
@@ -86,6 +87,7 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
+# === Worker ===
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
@@ -132,7 +134,6 @@ run_worker() {
     done
 }
 
-# === 界面功能 ===
 monitor_dashboard() {
     clear; echo "初始化数据..."; local r1=$(get_bytes rx); local t1=$(get_bytes tx)
     while true; do
@@ -165,26 +166,21 @@ view_logs() {
     read -n 1 -s -r -p "按任意键返回主菜单..."
 }
 
-ensure_script_file() {
-    
-    if [ -f "$0" ] && [ "$(realpath "$0")" == "$TARGET_PATH" ]; then
-        return 0
-    fi
-    
-    echo -e "${YELLOW}正在安装/更新脚本...${PLAIN}"
+force_update_script() {
+    echo -e "${YELLOW}正在拉取最新脚本...${PLAIN}"
     curl -o "$TARGET_PATH" -fsSL "$UPDATE_URL"
     chmod +x "$TARGET_PATH"
-    
     if [ ! -s "$TARGET_PATH" ]; then
-        echo -e "${RED}下载失败，请检查网络或 GitHub 连接。${PLAIN}"
+        echo -e "${RED}下载失败，请检查网络。${PLAIN}"
         exit 1
     fi
-    echo -e "${GREEN}脚本已更新至最新。${PLAIN}"
+    echo -e "${GREEN}脚本更新成功。${PLAIN}"
 }
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"; touch "$SOURCE_LIST_FILE"
-    ensure_script_file
+    
+    force_update_script
     
     echo "TARGET_RATIO=$DEFAULT_RATIO" > "$CONF_FILE"
     echo "MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS" >> "$CONF_FILE"
@@ -238,7 +234,7 @@ EOF
 set_parameters() {
     load_config; clear
     echo -e "${BLUE}╔════════════════════════════════════════╗${PLAIN}"
-    echo -e "${BLUE}║            参数配置向导                ║${PLAIN}"
+    echo -e "${BLUE}║             参数配置向导               ║${PLAIN}"
     echo -e "${BLUE}╚════════════════════════════════════════╝${PLAIN}"
     echo -e " 当前状态: 比例 1:${TARGET_RATIO} | 限速 ${MAX_SPEED_MBPS} Mbps"
     echo -e ""
@@ -326,7 +322,6 @@ show_menu() {
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
         
-        # === 核心修改：未安装时不显示区域 ===
         if is_installed; then
             echo -e " 所在区域 : $region_txt"
         fi
@@ -379,9 +374,5 @@ if [[ "$1" == "--worker" ]]; then run_worker; else
     [ $EUID -ne 0 ] && echo "请使用root运行" && exit 1
     
     if [ ! -f "$0" ] || [ "$(realpath "$0")" != "$TARGET_PATH" ]; then
-         curl -o "$TARGET_PATH" -fsSL "$UPDATE_URL"
-         chmod +x "$TARGET_PATH"
+         force_update_script
     fi
-    
-    show_menu
-fi

@@ -24,7 +24,7 @@ SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
 # === 默认配置 ===
 DEFAULT_RATIO=1.2
-DEFAULT_MAX_SPEED_MBPS=100
+DEFAULT_MAX_SPEED_MBPS=10
 
 # === 内置国内源 (CN) 
 DEFAULT_URLS_CN=(

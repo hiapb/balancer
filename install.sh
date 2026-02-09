@@ -22,17 +22,20 @@ SOURCE_LIST_FILE="${WORK_DIR}/custom_sources.txt"
 LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
+# === 默认配置 ===
 DEFAULT_RATIO=1.2
 DEFAULT_MAX_SPEED_MBPS=100
 
-# 国内源 (CN)
+# === 内置国内源 (CN) 
 DEFAULT_URLS_CN=(
-    "https://balancer.inim.im/d/down/Android20Studio202025.rar?sign=RIdltmoIedI7VXSu-hZ3inZpj2w3Lir1mSCRSPAniwk=:0"
+    "https://mirrors.tuna.tsinghua.edu.cn/debian-cd/current/amd64/iso-cd/debian-13.3.0-amd64-netinst.iso"
+    "https://mirrors.huaweicloud.com/centos/7/isos/x86_64/CentOS-7-x86_64-Everything-2009.iso"
 )
 
-# 国际源 (Global)
+# === 内置国际源 (Global) 
 DEFAULT_URLS_GLOBAL=(
-    "https://balancer.inim.im/d/down/Android20Studio202025.rar?sign=RIdltmoIedI7VXSu-hZ3inZpj2w3Lir1mSCRSPAniwk=:0"
+    "http://proof.ovh.net/files/10Gb.dat"
+    "http://speedtest.tokyo2.linode.com/100MB-tokyo2.bin"
 )
 
 calc_div() { awk -v a="$1" -v b="$2" 'BEGIN {if(b==0) print 0; else printf "%.2f", a/b}'; }
@@ -85,6 +88,7 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
+# === Worker (核心下载逻辑) ===
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
@@ -93,19 +97,29 @@ download_noise() {
     
     if [ "$ACTIVE_URL_MODE" == "CUSTOM" ] && [ ! -z "$CUSTOM_URL_VAL" ]; then
         url="$CUSTOM_URL_VAL"
-        if [[ ! $url =~ ^http ]]; then log "[警告] 自定义URL无效，回退"; url=""; fi
+        if [[ ! $url =~ ^http ]]; then log "[警告] 自定义URL无效，回退到内置池"; url=""; fi
     fi
 
     if [ -z "$url" ]; then
         local target_urls
-        if [ "$CURRENT_REGION" == "CN" ]; then target_urls=("${DEFAULT_URLS_CN[@]}")
-        else target_urls=("${DEFAULT_URLS_GLOBAL[@]}"); fi
+        if [ "$CURRENT_REGION" == "CN" ]; then 
+            target_urls=("${DEFAULT_URLS_CN[@]}")
+        else 
+            target_urls=("${DEFAULT_URLS_GLOBAL[@]}")
+        fi
+        
         local rand_idx=$(($RANDOM % ${#target_urls[@]}))
         url=${target_urls[$rand_idx]}
     fi
     
     log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
-    curl -L -k -4 -s -o /dev/null --limit-rate "$RATE_LIMIT_BYTES" --max-time 600 --retry 3 "$url"
+    
+    curl -L -k -4 -s -o /dev/null \
+    --connect-timeout 5 \
+    --limit-rate "$RATE_LIMIT_BYTES" \
+    --max-time 600 \
+    --retry 1 \
+    "$url"
 }
 
 run_worker() {
@@ -195,7 +209,7 @@ install_service() {
     
     echo -e ""
     echo -e "${YELLOW}请设置下载文件地址 (可选)${PLAIN}"
-    echo -e " 留空 = 使用脚本内置的 ${fr} 源池。"
+    echo -e " 留空 = 使用脚本内置的 ${fr} 源池 (自动轮询)。"
     read -p " URL: " curl_val
     if [ ! -z "$curl_val" ]; then
         echo "ACTIVE_URL_MODE=CUSTOM" >> "$CONF_FILE"
@@ -277,7 +291,7 @@ menu_source_manager() {
         case $opt in
             1) 
                 echo -e "\n请选择要使用的源："
-                echo -e " 0) ${YELLOW}恢复默认下载源${PLAIN}"
+                echo -e " 0) ${YELLOW}恢复默认(内置源池)${PLAIN}"
                 
                 # 安全读取数组
                 local i=1; local urls=()

@@ -209,7 +209,7 @@ install_service() {
     
     echo -e ""
     echo -e "${YELLOW}请设置下载文件地址 (可选)${PLAIN}"
-    echo -e " 留空 = 使用脚本内置的 ${fr} 源池 (自动轮询)。"
+    echo -e " 留空 = 使用脚本内置的 ${fr} 源池。"
     read -p " URL: " curl_val
     if [ ! -z "$curl_val" ]; then
         echo "ACTIVE_URL_MODE=CUSTOM" >> "$CONF_FILE"

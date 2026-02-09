@@ -1,5 +1,8 @@
 #!/bin/bash
 
+# =========================================================
+# Traffic Balancer - 智能流量平衡器 (Pro修正版)
+# =========================================================
 
 RED='\033[31m'
 GREEN='\033[32m'
@@ -22,12 +25,12 @@ DEFAULT_RATIO=1.2
 DEFAULT_CHECK_INTERVAL=10
 DEFAULT_MAX_SPEED_MBPS=100
 
-# 国内源 (CN)
+# 国内源 (CN) - 你指定的直链
 DEFAULT_URLS_CN=(
     "https://balancer.inim.im/d/down/Android20Studio202025.rar?sign=RIdltmoIedI7VXSu-hZ3inZpj2w3Lir1mSCRSPAniwk=:0"
 )
 
-# 国际源 (Global)
+# 国际源 (Global) - 你指定的直链
 DEFAULT_URLS_GLOBAL=(
     "https://balancer.inim.im/d/down/Android20Studio202025.rar?sign=RIdltmoIedI7VXSu-hZ3inZpj2w3Lir1mSCRSPAniwk=:0"
 )
@@ -85,7 +88,7 @@ load_config() {
         TARGET_RATIO=$DEFAULT_RATIO
         MAX_SPEED_MBPS=$DEFAULT_MAX_SPEED_MBPS
         REGION="GLOBAL"
-        ACTIVE_URL_MODE="DEFAULT" # DEFAULT or CUSTOM
+        ACTIVE_URL_MODE="DEFAULT"
         CUSTOM_URL_VAL=""
     fi
     [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=100
@@ -125,6 +128,7 @@ download_noise() {
     
     log "[执行] 缺口:${NEED_MB}MB | 限速:${SPEED_LIMIT_MBPS}Mbps | 目标:$(echo $url | awk -F/ '{print $3}')"
     
+    # 核心：只下载不保存 (-o /dev/null)
     curl -L -k -4 -s -o /dev/null \
     --limit-rate "$RATE_LIMIT_BYTES" \
     --max-time 600 \
@@ -134,7 +138,6 @@ download_noise() {
 
 run_worker() {
     load_config
-    # 首次运行如果没有配置Region，自动探测并写入
     if [ -z "$REGION" ]; then 
         REGION=$(detect_region)
         echo "REGION=$REGION" >> "$CONF_FILE"
@@ -189,16 +192,38 @@ monitor_dashboard() {
 view_logs() {
     clear
     echo -e "${BLUE}=== 最近 50 条日志 ===${PLAIN}"
-    tail -n 50 "$LOG_FILE"
+    if [ -f "$LOG_FILE" ]; then
+        tail -n 50 "$LOG_FILE"
+    else
+        echo "暂无日志文件"
+    fi
     echo ""
     echo -e "${BLUE}======================${PLAIN}"
     read -n 1 -s -r -p "按任意键返回主菜单..."
 }
 
 ensure_script_file() {
-    if [ -f "$TARGET_PATH" ]; then return 0; fi
-    # 简单的自我复制逻辑，如果是在安装
-    cp "$0" "$TARGET_PATH"; chmod +x "$TARGET_PATH"
+    # 修复：如果是通过管道运行（bash <(curl...)），$0 无法被复制
+    # 强制要求用户本地运行，或者通过检测大小来报警
+    if [ ! -f "$0" ]; then
+        echo -e "${RED}严重警告：请不要使用 curl | bash 方式运行本脚本！${PLAIN}"
+        echo -e "${YELLOW}请执行以下步骤：${PLAIN}"
+        echo -e "1. nano balancer.sh"
+        echo -e "2. 粘贴代码并保存"
+        echo -e "3. bash balancer.sh"
+        echo -e "正在尝试退出..."
+        exit 1
+    fi
+    
+    # 本地文件存在，执行复制
+    cp "$0" "$TARGET_PATH"
+    chmod +x "$TARGET_PATH"
+    
+    # 二次验证
+    if [ ! -s "$TARGET_PATH" ]; then
+        echo -e "${RED}错误：脚本文件安装失败（文件为空）。${PLAIN}"
+        exit 1
+    fi
 }
 
 # === 源管理模块 ===
@@ -242,8 +267,6 @@ menu_source_manager() {
             1)
                 echo -e "\n请选择要使用的源："
                 echo -e " 0) ${YELLOW}恢复默认 (内置源池)${PLAIN}"
-                
-                # 读取列表
                 local i=1
                 local urls=()
                 if [ -f "$SOURCE_LIST_FILE" ]; then
@@ -254,7 +277,6 @@ menu_source_manager() {
                         ((i++))
                     done < "$SOURCE_LIST_FILE"
                 fi
-                
                 echo ""
                 read -p " 请输入序号: " pick
                 if [ "$pick" == "0" ]; then
@@ -301,10 +323,8 @@ menu_source_manager() {
                     if [[ "$del_idx" =~ ^[0-9]+$ ]]; then
                         sed -i "${del_idx}d" "$SOURCE_LIST_FILE"
                         echo -e "${GREEN}删除成功${PLAIN}"
-                        # 如果删除的是当前正在用的，回退到默认
                         load_config
                         if [ "$ACTIVE_URL_MODE" == "CUSTOM" ]; then
-                            # 简单处理：重置为默认，防止指向空
                             save_config_var "ACTIVE_URL_MODE" "DEFAULT"
                             echo -e "${YELLOW}当前使用的源已被删除，已自动重置为默认源池。${PLAIN}"
                             systemctl restart traffic_balancer
@@ -321,6 +341,8 @@ menu_source_manager() {
 
 install_service() {
     check_dependencies; mkdir -p "$WORK_DIR"; touch "$LOG_FILE"; touch "$SOURCE_LIST_FILE"
+    
+    # 确保脚本文件正确复制
     ensure_script_file
     
     # === 初始化配置逻辑 ===
@@ -443,14 +465,16 @@ show_menu() {
             if systemctl is-active --quiet traffic_balancer; then status_icon="${GREEN}● 运行中${PLAIN}"; else status_icon="${YELLOW}● 已停止${PLAIN}"; fi
         fi
         
-        local region_txt="未配置"
-        if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
-
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        echo -e "${BLUE}     Traffic Balancer    ${PLAIN}"
+        echo -e "${BLUE}     Traffic Balancer     ${PLAIN}"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 运行状态 : $status_icon"
-        echo -e " 所在区域 : $region_txt"
+        # 修正：只有安装后才显示区域
+        if is_installed; then
+            local region_txt="未知"
+            if [ "$REGION" == "CN" ]; then region_txt="${GREEN}国内 (CN)${PLAIN}"; elif [ "$REGION" == "GLOBAL" ]; then region_txt="${CYAN}国际 (Global)${PLAIN}"; fi
+            echo -e " 所在区域 : $region_txt"
+        fi
         echo -e " 网卡接口 : $iface"
         echo -e "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
         echo -e " 流量统计:"

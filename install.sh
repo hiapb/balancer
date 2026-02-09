@@ -129,25 +129,39 @@ download_noise() {
 run_worker() {
     load_config
     [ -z "$REGION" ] && echo "REGION=$(detect_region)" >> "$CONF_FILE"
-    log "[启动] 模式:限速下载 | 目标 1:$TARGET_RATIO | 限速 ${MAX_SPEED_MBPS}Mbps"
+    log "[启动] 模式:智能节流 | 阈值:512MB | 限速:${MAX_SPEED_MBPS}Mbps"
+    
+    local LAST_TX=$(get_bytes tx)
+
     while true; do
         if [ -f "$CONF_FILE" ]; then source "$CONF_FILE"; fi
         [ -z "$MAX_SPEED_MBPS" ] && MAX_SPEED_MBPS=10
         
+        sleep 5
+        local CUR_TX=$(get_bytes tx)
+        local DIFF_TX=$((CUR_TX - LAST_TX))
+        LAST_TX=$CUR_TX
+        
+        local TX_SPEED_KBS=$(awk -v diff="$DIFF_TX" 'BEGIN {printf "%.0f", diff/1024/5}')
+        
+        if [ "$TX_SPEED_KBS" -lt 128 ]; then
+            sleep 10
+            continue
+        fi
+
         local RX_TOTAL=$(get_bytes rx); local TX_TOTAL=$(get_bytes tx)
         local TX_MB=$(calc_div $TX_TOTAL 1048576); local RX_MB=$(calc_div $RX_TOTAL 1048576)
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
         if [ $(calc_gt $MISSING 512) -eq 1 ]; then
-            log "[监控] 缺口:${MISSING}MB -> 启动下载"
+            log "[监控] 速率:${TX_SPEED_KBS}KB/s | 缺口:${MISSING}MB -> 补货"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
             
             SLEEP_TIME=$((120 + RANDOM % 181))
-            
-            log "[保护] 下载结束，进入冷却模式，暂停 ${SLEEP_TIME} 秒..."
+            log "[保护] 任务完成，冷却 ${SLEEP_TIME} 秒..."
             sleep $SLEEP_TIME
-            
+            LAST_TX=$(get_bytes tx)
         else
             sleep 10
         fi

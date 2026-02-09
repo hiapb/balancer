@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # =========================================================
-# Traffic Balancer
+# Traffic Balancer 
 # =========================================================
 
 RED='\033[31m'
@@ -13,7 +13,6 @@ CYAN='\033[96m'
 PLAIN='\033[0m'
 BOLD='\033[1m'
 
-# 更新地址
 UPDATE_URL="https://raw.githubusercontent.com/hiapb/balancer/main/install.sh"
 
 TARGET_PATH="/root/balancer.sh"
@@ -23,7 +22,6 @@ SOURCE_LIST_FILE="${WORK_DIR}/custom_sources.txt"
 LOG_FILE="/var/log/traffic_balancer.log"
 SERVICE_FILE="/etc/systemd/system/traffic_balancer.service"
 
-# === 默认配置 ===
 DEFAULT_RATIO=1.2
 DEFAULT_MAX_SPEED_MBPS=100
 
@@ -87,7 +85,6 @@ load_config() {
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" >> "$LOG_FILE"; }
 
-# === Worker ===
 download_noise() {
     local NEED_MB=$1; local CURRENT_REGION=$2; local SPEED_LIMIT_MBPS=$3
     local RATE_LIMIT_MB=$(awk -v bw="$SPEED_LIMIT_MBPS" 'BEGIN {printf "%.2f", bw/8}')
@@ -271,28 +268,82 @@ menu_source_manager() {
         local st="${YELLOW}默认源池${PLAIN}"; [ "$ACTIVE_URL_MODE" == "CUSTOM" ] && st="${GREEN}自定义源${PLAIN}"
         echo -e " 当前策略: $st"
         echo -e ""
-        echo " 1. 查看/切换 使用源"
-        echo " 2. 添加 自定义源"
-        echo " 3. 删除 自定义源"
+        echo " 1. 查看/切换源"
+        echo " 2. 添加自定义源"
+        echo " 3. 删除自定义源"
         echo " 0. 返回主菜单"
         echo ""
         read -p " 请输入选项: " opt
         case $opt in
             1) 
                 echo -e "\n请选择要使用的源："
-                echo -e " 0) ${YELLOW}恢复默认 (内置源池)${PLAIN}"; local i=1; local urls=()
-                while read -r l; do [ -z "$l" ] && continue; urls+=("$l"); echo " $i) $l"; ((i++)); done < "$SOURCE_LIST_FILE"
-                read -p " 请输入序号: " p
-                if [ "$p" == "0" ]; then save_config_var "ACTIVE_URL_MODE" "DEFAULT"; else
-                    idx=$((p-1)); [ ! -z "${urls[$idx]}" ] && { save_config_var "ACTIVE_URL_MODE" "CUSTOM"; save_config_var "CUSTOM_URL_VAL" "${urls[$idx]}"; }
+                echo -e " 0) ${YELLOW}恢复默认下载源${PLAIN}"
+                
+                # 安全读取数组
+                local i=1; local urls=()
+                if [ -f "$SOURCE_LIST_FILE" ]; then
+                     while IFS= read -r l || [ -n "$l" ]; do 
+                         [ -z "$l" ] && continue
+                         urls+=("$l")
+                         echo -e " $i) $l"
+                         ((i++))
+                     done < "$SOURCE_LIST_FILE"
                 fi
-                systemctl restart traffic_balancer; read -p "按回车继续..." ;;
+
+                read -p " 请输入序号: " p
+                if [[ ! "$p" =~ ^[0-9]+$ ]]; then
+                    echo -e "${RED}请输入有效的数字！${PLAIN}"
+                elif [ "$p" == "0" ]; then
+                    save_config_var "ACTIVE_URL_MODE" "DEFAULT"
+                    echo -e "${GREEN}已切换为默认源池。${PLAIN}"
+                    systemctl restart traffic_balancer
+                elif [ "$p" -gt 0 ] && [ "$p" -le "${#urls[@]}" ]; then
+                    idx=$((p-1))
+                    save_config_var "ACTIVE_URL_MODE" "CUSTOM"
+                    save_config_var "CUSTOM_URL_VAL" "${urls[$idx]}"
+                    echo -e "${GREEN}已切换为: ${urls[$idx]}${PLAIN}"
+                    systemctl restart traffic_balancer
+                else
+                    echo -e "${RED}序号无效，请重新输入。${PLAIN}"
+                fi
+                read -p "按回车继续..." 
+                ;;
             2) 
                 echo -e "\n请输入新的下载链接:"
-                read -p " URL: " u; [ ! -z "$u" ] && echo "$u" >> "$SOURCE_LIST_FILE" && echo -e "${GREEN}已添加${PLAIN}"; read -p "按回车继续..." ;;
+                read -p " URL: " u
+                if [ ! -z "$u" ]; then
+                    echo "$u" >> "$SOURCE_LIST_FILE"
+                    echo -e "${GREEN}已添加${PLAIN}"
+                else
+                     echo -e "${RED}输入不能为空${PLAIN}"
+                fi
+                read -p "按回车继续..." 
+                ;;
             3) 
-                echo -e "\n删除模式："
-                read -p " 请输入删除序号: " d; sed -i "${d}d" "$SOURCE_LIST_FILE" 2>/dev/null; echo -e "${GREEN}已删除${PLAIN}"; read -p "按回车继续..." ;;
+                echo -e "\n删除模式 (仅限自定义源)："
+                local i=1; local urls=()
+                if [ -f "$SOURCE_LIST_FILE" ]; then
+                    while IFS= read -r l || [ -n "$l" ]; do
+                        [ -z "$l" ] && continue
+                        urls+=("$l")
+                        echo -e " $i) $l"
+                        ((i++))
+                    done < "$SOURCE_LIST_FILE"
+                fi
+
+                if [ ${#urls[@]} -eq 0 ]; then
+                    echo -e "${YELLOW}没有自定义源可删除。${PLAIN}"
+                else
+                    read -p " 请输入删除序号: " d
+                    if [[ "$d" =~ ^[0-9]+$ ]] && [ "$d" -gt 0 ] && [ "$d" -le "${#urls[@]}" ]; then
+                        sed -i "${d}d" "$SOURCE_LIST_FILE" 2>/dev/null
+                        echo -e "${GREEN}已删除${PLAIN}"
+                    else
+                        echo -e "${RED}序号无效${PLAIN}"
+                    fi
+                fi
+                read -p "按回车继续..." 
+                ;;
             0) break ;;
         esac
     done
@@ -376,3 +427,6 @@ if [[ "$1" == "--worker" ]]; then run_worker; else
     if [ ! -f "$0" ] || [ "$(realpath "$0")" != "$TARGET_PATH" ]; then
          force_update_script
     fi
+    
+    show_menu
+fi

@@ -135,7 +135,7 @@ run_worker() {
         local TARGET_RX_MB=$(calc_mul $TX_MB $TARGET_RATIO)
         local MISSING=$(calc_sub $TARGET_RX_MB $RX_MB)
         
-        if [ $(calc_gt $MISSING 50) -eq 1 ]; then
+        if [ $(calc_gt $MISSING 512) -eq 1 ]; then
             log "[监控] 缺口:${MISSING}MB -> 启动下载"
             download_noise $MISSING $REGION $MAX_SPEED_MBPS
             
